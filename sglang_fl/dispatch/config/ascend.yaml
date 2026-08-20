@@ -44,6 +44,20 @@ flagos_blacklist:
   - floor_divide
   - true_divide_
   - addmm
+  # FlagGems' generic broadcast mul materializes shape/stride metadata with a
+  # host-to-NPU copy at call time on Triton-Ascend 3.2.1.  NPUGraph forbids
+  # that synchronized copy while capturing Qwen3.6's causal-conv decode path,
+  # so keep aten.mul on torch_npu for graph-safe execution.
+  - mul
+  # FlagGems stack fails to compile on Triton-Ascend 3.2.1 when Qwen3.6
+  # combines tensors backed by different pointer sources during the server
+  # warmup request ("ptr type from different source not supported").
+  - stack
+  # Qwen3.6's multimodal embedding routine invokes masked_scatter_ with an
+  # empty/special-shape mask for text-only requests.  FlagGems' generic path
+  # either mis-broadcasts zero dimensions or launches a kernel that raises an
+  # Ascend vector-core error for an empty source; torch_npu handles both cases.
+  - masked_scatter_
 
 # OOT dispatch blacklist (sglang op CLASS names, not ATen op names): none needed.
 # MRotaryEmbedding was listed pre-verification but confirmed UNNECESSARY: with
