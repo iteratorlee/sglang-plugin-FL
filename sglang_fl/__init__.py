@@ -335,10 +335,11 @@ def _make_dispatch_hook(config: dict = None):
         # Find bridge function for this op (supports subclasses via MRO)
         bridge_fn = _find_bridge(op_cls)
         if bridge_fn is None:
-            # No bridge registered: return forward_cuda directly to bypass dispatch_forward.
-            # This allows unregistered OOT ops (e.g., MoE before bridge is added) to use
-            # their native CUDA implementation instead of falling into forward_native.
-            result = self.forward_cuda
+            # Let SGLang's OOT dispatch select ``forward_<device>``.  Current
+            # SGLang exposes this via PlatformFL.get_dispatch_key_name(); using
+            # forward_cuda directly is incorrect for Ascend and other
+            # non-CUDA OOT devices.
+            result = original_fn(self)
             self._fl_cached_fn = result
             return result
 
@@ -810,11 +811,14 @@ def load_plugin():
         use_fg = _parse_bool(os.environ.get("USE_FLAGGEMS", "1"), default=True)
         aten_status = "OFF" if not use_fg else "ON"
         oot_status = f"prefer={config['prefer']}" if oot_enabled else "OFF"
-        # Reflects env-var configuration only; vendor-specific defaults (e.g. hccl
-        # on Ascend) are not shown here — see PlatformFL init log for the full result.
-        dist_backend = os.environ.get("SGLANG_FL_DIST_BACKEND", "").strip() or (
-            "flagcx" if os.environ.get("FLAGCX_PATH", "").strip() else "nccl"
-        )
+        try:
+            from sglang.srt.platforms import current_platform
+
+            dist_backend = current_platform.get_torch_distributed_backend_str()
+        except Exception:
+            dist_backend = os.environ.get("SGLANG_FL_DIST_BACKEND", "").strip() or (
+                "flagcx" if os.environ.get("FLAGCX_PATH", "").strip() else "nccl"
+            )
         banner = (
             "\n"
             "+" + "=" * 58 + "+\n"

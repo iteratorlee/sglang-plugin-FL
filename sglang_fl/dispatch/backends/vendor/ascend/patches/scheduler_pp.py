@@ -50,7 +50,9 @@ def patch_pp_send_recv_order() -> None:
         # and the ring deadlocks. Order send/recv by pp_rank parity (even:
         # send->recv, odd: recv->send) so each adjacent pair has one sender and
         # one receiver posted at the same time.
-        send_first = (self.pp_rank % 2) == 0
+        parallel_state = getattr(self, "ps", None)
+        pp_rank = getattr(parallel_state, "pp_rank", getattr(self, "pp_rank", 0))
+        send_first = (pp_rank % 2) == 0
         if self.device == "npu":
             self.device_module.synchronize()
 
@@ -64,14 +66,35 @@ def patch_pp_send_recv_order() -> None:
 
         def _do_recv():
             nonlocal next_pp_outputs, batch_result, d2h_event
-            if mbs[next_mb_id] is None or mbs[next_mb_id].forward_mode.is_prebuilt():
+            target = mbs[next_mb_id]
+            if target is None or target.forward_mode.is_prebuilt():
+                return
+            # SGLang's current PP path can bypass output communication for a
+            # subset of batches.  Preserve that behavior when the helper is
+            # available instead of overwriting it with the 0.5.11 copy.
+            try:
+                from sglang.srt.managers.scheduler_pp_mixin import (
+                    _pp_can_skip_output_comm,
+                )
+            except ImportError:
+                _pp_can_skip_output_comm = None
+            if (
+                _pp_can_skip_output_comm is not None
+                and hasattr(self, "_pp_make_skip_output_result")
+                and _pp_can_skip_output_comm(target)
+            ):
+                next_pp_outputs, batch_result, d2h_event = (
+                    self._pp_make_skip_output_result(
+                        target, mb_metadata[next_mb_id]
+                    )
+                )
                 return
             with torch.profiler.record_function("recv_res_dict_from_prev_stage"):
                 next_pp_outputs = PPProxyTensors(self._pp_recv_dict_from_prev_stage())
             with self.copy_stream_ctx:
                 self.copy_stream.wait_stream(self.schedule_stream)
                 batch_result = self._pp_prep_batch_result(
-                    mbs[next_mb_id], mb_metadata[next_mb_id], next_pp_outputs
+                    target, mb_metadata[next_mb_id], next_pp_outputs
                 )
                 d2h_event = self.device_module.Event()
                 d2h_event.record(self.device_module.current_stream())

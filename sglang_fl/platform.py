@@ -141,6 +141,16 @@ class PlatformFL(SRTPlatform):
     def is_cuda(self) -> bool:
         return self._device_type == "cuda"
 
+    def is_npu(self) -> bool:
+        """Return whether the detected device is an Ascend-style NPU.
+
+        ``PlatformFL`` deliberately keeps ``PlatformEnum.OOT`` so SGLang uses
+        the out-of-tree dispatch path.  Consequently the base
+        :meth:`DeviceMixin.is_npu` implementation (which only checks the enum)
+        cannot identify an OOT NPU and must be overridden here.
+        """
+        return self._device_type == "npu"
+
     def is_cuda_alike(self) -> bool:
         """True for devices that expose CUDA-compatible APIs."""
         # Iluvatar uses CUDA API but is not NVIDIA
@@ -244,9 +254,11 @@ class PlatformFL(SRTPlatform):
             )
 
             return NPUGraphRunner
-        from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
+        from sglang.srt.model_executor.runner.decode_cuda_graph_runner import (
+            DecodeCudaGraphRunner,
+        )
 
-        return CudaGraphRunner
+        return DecodeCudaGraphRunner
 
     def get_mha_kv_pool_cls(self) -> type:
         if self._device_type == "npu":
@@ -270,6 +282,13 @@ class PlatformFL(SRTPlatform):
 
         return MLATokenToKVPool
 
+    def get_dsa_kv_pool_cls(self) -> type:
+        """Return the DSA KV pool introduced by recent SGLang versions."""
+        from sglang.srt.mem_cache.memory_pool import DSATokenToKVPool
+
+        return DSATokenToKVPool
+
+    # Compatibility alias for SGLang releases that still called this NSA.
     def get_nsa_kv_pool_cls(self) -> type:
         if self._device_type == "npu":
             from sglang.srt.hardware_backend.npu.memory_pool_npu import (
@@ -293,6 +312,25 @@ class PlatformFL(SRTPlatform):
 
         return PagedTokenToKVPoolAllocator
 
+    def get_piecewise_backend_cls(self) -> type:
+        if self._device_type == "npu":
+            from sglang.srt.compilation.npu_piecewise_backend import (
+                NPUPiecewiseBackend,
+            )
+
+            return NPUPiecewiseBackend
+        if self._device_type == "xpu":
+            from sglang.srt.compilation.xpu_piecewise_backend import (
+                XPUPiecewiseBackend,
+            )
+
+            return XPUPiecewiseBackend
+        from sglang.srt.compilation.cuda_piecewise_backend import (
+            CUDAPiecewiseBackend,
+        )
+
+        return CUDAPiecewiseBackend
+
     # ------------------------------------------------------------------
     # Capability flags
     # ------------------------------------------------------------------
@@ -310,7 +348,9 @@ class PlatformFL(SRTPlatform):
     def support_piecewise_cuda_graph(self) -> bool:
         return self._device_type == "cuda"
 
-    def is_pin_memory_available(self) -> bool:
+    def is_pin_memory_available(self, device=None) -> bool:
+        if device is not None and str(device) == "cpu":
+            return False
         return self._device_type in ("cuda", "npu", "xpu", "musa", "tsingmicro")
 
     def supports_fp8(self) -> bool:
@@ -353,10 +393,11 @@ class PlatformFL(SRTPlatform):
     def get_dispatch_key_name(self) -> str:
         """Return dispatch key for MultiPlatformOp OOT lookup.
 
-        Returns "oot" — our AROUND hook on dispatch_forward() intercepts
-        before upstream's single-key lookup and does multi-backend resolution.
+        The FL AROUND hook intercepts registered bridge ops.  Returning the
+        real device key here lets every other op fall back to SGLang's native
+        ``forward_<device>`` method (notably ``forward_npu`` on Ascend).
         """
-        return "oot"
+        return self._device_type
 
     # ------------------------------------------------------------------
     # Configuration lifecycle

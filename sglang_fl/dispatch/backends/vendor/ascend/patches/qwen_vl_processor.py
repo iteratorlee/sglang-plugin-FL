@@ -40,6 +40,18 @@ def patch_qwen_vl_processor() -> None:
         )
         return
 
+    # Newer SGLang imports these helpers from ``transformers.image_transforms``
+    # and no longer needs the compatibility shim.  Import the real module as a
+    # capability probe; only install the shim when the historical ImportError
+    # is still present.
+    try:
+        importlib.import_module(_SGLANG_QWEN_MODULE)
+    except ImportError:
+        sys.modules.pop(_SGLANG_QWEN_MODULE, None)
+    else:
+        logger.info("Ascend qwen_vl_processor patch not needed on current SGLang")
+        return
+
     shim = types.ModuleType(_SGLANG_QWEN_MODULE)
     shim.__doc__ = "sglang_fl Ascend shim for qwen_vl_processor (lazy)."
 

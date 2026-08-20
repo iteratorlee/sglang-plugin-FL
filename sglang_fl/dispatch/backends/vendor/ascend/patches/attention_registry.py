@@ -26,6 +26,15 @@ def patch_attn_backend_wrapper() -> None:
         logger.warning("Ascend attn_backend_wrapper patch skipped: %s", e)
         return
 
+    # Current SGLang already carries the NPU-aware hybrid GDN wrapper.  Its
+    # module globals include the config helper functions introduced with the
+    # refactor and it imports FLA from ``sglang.kernels``.  Replacing it with
+    # the legacy wrapper below would reintroduce deleted runner attributes and
+    # the removed ``sglang.srt.layers.attention.fla`` import path.
+    if hasattr(ar, "hybrid_gdn_config") and hasattr(ar, "mambaish_config"):
+        logger.info("Ascend attn_backend_wrapper patch not needed on current SGLang")
+        return
+
     def attn_backend_wrapper(runner, full_attn_backend):
         """
         Wrapper for special models like hybrid GDN, so we don't

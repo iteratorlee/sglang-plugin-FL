@@ -2,6 +2,7 @@
 """Monkey-patch SGLang FLA functions to use dispatch mechanism."""
 
 import logging
+import importlib
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,25 @@ def patch_fla_functions():
     This allows FLA ops to go through the dispatch system like other fused ops.
     """
     try:
-        # Import SGLang FLA modules
-        import sglang.srt.layers.attention.fla.chunk as chunk_module
-        import sglang.srt.layers.attention.fla.fused_recurrent as fused_recurrent_module
+        # FLA moved from ``srt.layers.attention`` to ``sglang.kernels`` in
+        # newer SGLang releases.  Prefer the current location and retain the
+        # old one for compatibility with the original plugin baseline.
+        try:
+            chunk_module = importlib.import_module(
+                "sglang.kernels.ops.attention.fla.chunk"
+            )
+            fused_recurrent_module = importlib.import_module(
+                "sglang.kernels.ops.attention.fla.fused_recurrent"
+            )
+            module_family = "sglang.kernels.ops.attention.fla"
+        except ImportError:
+            chunk_module = importlib.import_module(
+                "sglang.srt.layers.attention.fla.chunk"
+            )
+            fused_recurrent_module = importlib.import_module(
+                "sglang.srt.layers.attention.fla.fused_recurrent"
+            )
+            module_family = "sglang.srt.layers.attention.fla"
 
         # Import our bridge functions
         from sglang_fl.dispatch.bridge.fla_chunk import chunk_gated_delta_rule_bridge
@@ -64,7 +81,7 @@ def patch_fla_functions():
         except Exception as e:
             logger.warning(f"Failed to patch gdn_triton.py: {e}")
 
-        logger.info("Successfully patched FLA functions for dispatch")
+        logger.info("Successfully patched FLA functions for dispatch (%s)", module_family)
 
         return _originals
 

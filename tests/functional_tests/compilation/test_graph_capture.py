@@ -11,6 +11,7 @@ capture/replay, and a small ``call_op`` capture smoke path.
 from __future__ import annotations
 
 import pytest
+import sglang  # noqa: F401 -- initialize the host before importing its platform plugin
 import torch
 import torch.nn.functional as F
 
@@ -80,11 +81,13 @@ def test_platform_graph_capability_flags() -> None:
 
 
 def test_cuda_like_platform_uses_sglang_cuda_graph_runner() -> None:
-    """CUDA and MUSA reuse SGLang's native CudaGraphRunner."""
-    from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
+    """CUDA and MUSA reuse SGLang's native decode graph runner."""
+    from sglang.srt.model_executor.runner.decode_cuda_graph_runner import (
+        DecodeCudaGraphRunner,
+    )
 
-    assert _platform_for("cuda").get_graph_runner_cls() is CudaGraphRunner
-    assert _platform_for("musa").get_graph_runner_cls() is CudaGraphRunner
+    assert _platform_for("cuda").get_graph_runner_cls() is DecodeCudaGraphRunner
+    assert _platform_for("musa").get_graph_runner_cls() is DecodeCudaGraphRunner
 
 
 def test_npu_platform_uses_sglang_npu_graph_runner() -> None:
