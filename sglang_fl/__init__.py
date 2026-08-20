@@ -531,8 +531,7 @@ def _setup_communicator_hooks():
     def _reduce_scatter_tensor_hook(original_fn, self, output, input_):
         comm = getattr(self, "fl_communicator", None)
         if comm is not None and not comm.disabled:
-            comm.reduce_scatter(output, input_)
-            return
+            return comm.reduce_scatter(output, input_)
         return original_fn(self, output, input_)
 
     # ── all_gather_into_tensor hook ──
@@ -554,11 +553,11 @@ def _setup_communicator_hooks():
 
     # ── all_gatherv hook ──
 
-    def _all_gatherv_hook(original_fn, self, input_, sizes=None):
+    def _all_gatherv_hook(original_fn, self, input_, sizes=None, output=None):
         comm = getattr(self, "fl_communicator", None)
         if comm is not None and not comm.disabled:
-            return comm.all_gatherv(input_, sizes=sizes)
-        return original_fn(self, input_, sizes=sizes)
+            return comm.all_gatherv(input_, sizes=sizes, output=output)
+        return original_fn(self, input_, sizes=sizes, output=output)
 
     # ── send hook ──
 
@@ -635,6 +634,7 @@ def _setup_communicator_hooks():
                 dst=dst,
                 send_object_fn=self.send_object,
                 all_gather_group=all_gather_group,
+                async_send=async_send,
             )
         return original_fn(
             self,

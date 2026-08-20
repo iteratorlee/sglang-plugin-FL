@@ -120,12 +120,13 @@ class CommunicatorFL:
 
     # ─── reduce_scatter ──────────────────────────────────────────────────────
 
-    def reduce_scatter(self, output: torch.Tensor, input_: torch.Tensor) -> None:
+    def reduce_scatter(self, output: torch.Tensor, input_: torch.Tensor) -> torch.Tensor:
         """Reduce-scatter tensor (in-place into output)."""
         if self._flagcx_comm and not self._flagcx_comm.disabled:
             self._flagcx_comm.reduce_scatter(output, input_)
-            return
-        dist.reduce_scatter_tensor(output, input_, group=self.device_group)
+        else:
+            dist.reduce_scatter_tensor(output, input_, group=self.device_group)
+        return output
 
     # ─── reduce_scatterv ─────────────────────────────────────────────────────
 
@@ -178,11 +179,16 @@ class CommunicatorFL:
         self,
         input_: Union[torch.Tensor, List[torch.Tensor]],
         sizes: Optional[List[int]] = None,
+        output: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
         """All-gather with variable sizes per rank."""
         world_size = self.world_size
 
-        def _all_gather_single(inp: torch.Tensor, sizes: Optional[List[int]]):
+        def _all_gather_single(
+            inp: torch.Tensor,
+            sizes: Optional[List[int]],
+            out: Optional[torch.Tensor] = None,
+        ):
             input_size = inp.size()
             if sizes is not None:
                 assert len(sizes) == world_size
@@ -194,7 +200,16 @@ class CommunicatorFL:
             else:
                 output_size = (input_size[0] * world_size,) + input_size[1:]
 
-            output_tensor = torch.empty(output_size, dtype=inp.dtype, device=inp.device)
+            if out is not None:
+                assert tuple(out.shape) == tuple(output_size), (
+                    f"all_gatherv output buffer shape {tuple(out.shape)} "
+                    f"!= expected {tuple(output_size)}"
+                )
+                output_tensor = out
+            else:
+                output_tensor = torch.empty(
+                    output_size, dtype=inp.dtype, device=inp.device
+                )
 
             if self._flagcx_comm and not self._flagcx_comm.disabled:
                 if sizes is not None and hasattr(self._flagcx_comm, "all_gatherv"):
@@ -206,20 +221,27 @@ class CommunicatorFL:
 
             return output_tensor
 
-        if isinstance(input_, torch.Tensor):
+        single_input = isinstance(input_, torch.Tensor)
+        if single_input:
             input_ = [input_]
+        elif output is not None:
+            raise ValueError("all_gatherv `output` requires a single-tensor input")
 
         if self._flagcx_comm and not self._flagcx_comm.disabled:
             output_list = []
             self._flagcx_comm.group_start()
             for inp in input_:
-                output_list.append(_all_gather_single(inp, sizes=sizes))
+                output_list.append(
+                    _all_gather_single(inp, sizes=sizes, out=output)
+                )
             self._flagcx_comm.group_end()
             return output_list
         else:
             output_list = []
             for inp in input_:
-                output_list.append(_all_gather_single(inp, sizes=sizes))
+                output_list.append(
+                    _all_gather_single(inp, sizes=sizes, out=output)
+                )
             return output_list
 
     # ─── send ────────────────────────────────────────────────────────────────
@@ -357,6 +379,7 @@ class CommunicatorFL:
         dst: int,
         send_object_fn,
         all_gather_group=None,
+        async_send: bool = False,
     ):
         """Send a tensor dict. GPU tensors go via FlagCX, metadata via CPU.
 
@@ -382,10 +405,22 @@ class CommunicatorFL:
             else:
                 metadata_list.append((key, value))
 
-        # Use async_send=True to avoid deadlock: in PP mode both ranks may
-        # call send_tensor_dict before either calls recv_tensor_dict.
-        # Synchronous Gloo send would block waiting for a matching recv.
-        p2p_works = send_object_fn(metadata_list, dst=dst, async_send=True)
+        p2p_works = send_object_fn(
+            metadata_list, dst=dst, async_send=async_send
+        )
+        if p2p_works is None:
+            p2p_works = []
+
+        send_func = dist.isend if async_send else dist.send
+
+        def _torch_send(tensor, group):
+            work = send_func(tensor, self.ranks[dst], group=group)
+            if async_send:
+                # Keep the tensor alive until the nonblocking send completes,
+                # matching GroupCoordinator.send_tensor_dict in SGLang 0.5.17.
+                from sglang.srt.distributed.parallel_state import P2PWork
+
+                p2p_works.append(P2PWork(work, tensor))
 
         if self._flagcx_comm and not self._flagcx_comm.disabled:
             for tensor in tensor_list:
@@ -400,7 +435,7 @@ class CommunicatorFL:
                 if not t.is_cpu:
                     self._flagcx_comm.send(t, dst)
                 else:
-                    dist.send(t, self.ranks[dst], self.cpu_group)
+                    _torch_send(t, self.cpu_group)
         else:
             for tensor in tensor_list:
                 if tensor.numel() == 0:
@@ -412,9 +447,9 @@ class CommunicatorFL:
                 ):
                     t = tensor.reshape(all_gather_size, -1)[all_gather_rank]
                 if t.is_cpu:
-                    dist.send(t, self.ranks[dst], self.cpu_group)
+                    _torch_send(t, self.cpu_group)
                 else:
-                    dist.send(t, self.ranks[dst], self.device_group)
+                    _torch_send(t, self.device_group)
 
         # Return metadata p2p_works so PP mixin can manage their lifecycle.
         # Do NOT wait here — the peer may not have posted recv yet (PP sends

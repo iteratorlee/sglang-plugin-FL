@@ -418,7 +418,7 @@ def test_broadcast_tensor_dict_receiver_allocates_from_metadata(monkeypatch) -> 
     dist_broadcast.assert_called_once()
 
 
-def test_send_tensor_dict_metadata_async_and_skips_empty(monkeypatch) -> None:
+def test_send_tensor_dict_defaults_to_sync_and_skips_empty(monkeypatch) -> None:
     from sglang_fl.distributed import communicator as comm_mod
     from sglang_fl.distributed.communicator import TensorMetadata
 
@@ -440,11 +440,33 @@ def test_send_tensor_dict_metadata_async_and_skips_empty(monkeypatch) -> None:
 
     assert result is works
     metadata = sent[0][0]
-    assert sent[0][1:] == (1, True)
+    assert sent[0][1:] == (1, False)
     assert isinstance(metadata[0][1], TensorMetadata)
     assert isinstance(metadata[1][1], TensorMetadata)
     assert metadata[2] == ("value", "x")
     dist_send.assert_called_once()
+
+
+def test_send_tensor_dict_async_returns_tensor_work(monkeypatch) -> None:
+    from sglang_fl.distributed import communicator as comm_mod
+
+    tensor_work = object()
+    dist_isend = Mock(return_value=tensor_work)
+    monkeypatch.setattr(comm_mod.dist, "isend", dist_isend)
+    comm = _make_comm(world_size=2, rank=0)
+    metadata_work = object()
+
+    result = comm.send_tensor_dict(
+        {"tensor": torch.ones(2)},
+        dst=1,
+        send_object_fn=lambda metadata, dst, async_send: [metadata_work],
+        async_send=True,
+    )
+
+    assert result[0] is metadata_work
+    assert result[1].work is tensor_work
+    assert result[1].payload.shape == (2,)
+    dist_isend.assert_called_once()
 
 
 def test_recv_tensor_dict_allocates_and_waits(monkeypatch) -> None:
