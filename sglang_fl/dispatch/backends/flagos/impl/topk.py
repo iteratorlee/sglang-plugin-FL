@@ -46,8 +46,27 @@ def topk_flagos(
     Returns:
         TopKOutput (StandardTopKOutput format)
     """
-    topk = obj.topk_config.topk
-    renormalize = obj.topk_config.renormalize
+    topk_config = obj.topk_config
+    # SGLang renamed TopKConfig.topk to top_k.  Keep the legacy fallback so
+    # the plugin remains usable with older SGLang installations.
+    topk = getattr(topk_config, "top_k", None)
+    if topk is None:
+        topk = topk_config.topk
+    renormalize = topk_config.renormalize
+
+    # FlagGems topk_softmax implements the plain softmax routing path.  Let the
+    # dispatch manager fall through to the vendor implementation for routing
+    # modes that need extra metadata or different score semantics.
+    if (
+        getattr(topk_config, "use_grouped_topk", False)
+        or getattr(topk_config, "correction_bias", None) is not None
+        or getattr(topk_config, "scoring_func", "softmax") != "softmax"
+        or num_token_non_padded is not None
+        or expert_location_dispatch_info is not None
+    ):
+        raise NotImplementedError(
+            "FlagGems topk_softmax only supports plain softmax routing"
+        )
 
     M = hidden_states.shape[0]
     topk_weights = torch.empty(
@@ -65,5 +84,5 @@ def topk_flagos(
     return StandardTopKOutput(
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        token_expert_indices=token_expert_indices,
+        router_logits=router_logits,
     )
