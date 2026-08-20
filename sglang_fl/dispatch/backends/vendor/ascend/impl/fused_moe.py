@@ -25,11 +25,13 @@ def fused_moe_ascend(
     layer: torch.nn.Module,
     dispatch_output,
 ):
-    # Current SGLang performs Ascend routing in AscendTPDispatcher before the
-    # quant method is called.  Its MoeRunner owns the matching pre/post permute
-    # adapters and must receive the structured AscendTPDispatchOutput intact.
-    # Delegating here mirrors UnquantizedFusedMoEMethod.forward_npu.
-    if hasattr(dispatch_output, "group_list_type") and hasattr(obj, "runner"):
+    # Current SGLang performs routing in a dispatcher before the quant method
+    # is called.  Its MoeRunner owns the matching Ascend-TP or DeepEP adapters
+    # and must receive every structured DispatchOutput intact.  Do not infer
+    # the dispatcher from format-specific fields: DeepEPLLDispatchOutput, for
+    # example, has no group_list_type or nested topk_output.  Delegating when a
+    # runner is available mirrors UnquantizedFusedMoEMethod.forward_npu.
+    if hasattr(obj, "runner"):
         return obj.runner.run(dispatch_output, layer)
 
     # Compatibility path for the pre-runner API, where dispatch_output was a

@@ -51,10 +51,28 @@ def test_flagos_topk_rejects_routing_modes_it_cannot_represent() -> None:
         topk_flagos(obj, torch.randn(2, 4), torch.randn(2, 8))
 
 
-def test_ascend_fused_moe_delegates_current_structured_dispatch_output() -> None:
+@pytest.mark.parametrize(
+    "dispatch_output",
+    [
+        pytest.param(SimpleNamespace(group_list_type=1), id="ascend-tp"),
+        pytest.param(
+            SimpleNamespace(
+                hidden_states=object(),
+                hidden_states_scale=None,
+                topk_ids=object(),
+                topk_weights=object(),
+                masked_m=object(),
+                expected_m=64,
+            ),
+            id="deepep-low-latency",
+        ),
+    ],
+)
+def test_ascend_fused_moe_delegates_current_structured_dispatch_output(
+    dispatch_output,
+) -> None:
     expected = object()
     layer = object()
-    dispatch_output = SimpleNamespace(group_list_type=1)
 
     class FakeRunner:
         def __init__(self):
