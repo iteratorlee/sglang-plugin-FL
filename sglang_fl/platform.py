@@ -224,6 +224,43 @@ class PlatformFL(SRTPlatform):
             raise RuntimeError(f"No torch.{self._device_type} module available")
         return self._torch_device_mod.mem_get_info(device_id)
 
+    def get_torch_profiler_activity_str(self) -> str:
+        """Return the profiler activity name used by the active accelerator.
+
+        SGLang asks every out-of-tree platform for this value while creating a
+        serving profiler.  Ascend exposes an NPU-specific activity through
+        ``torch_npu``; CUDA-compatible vendors continue to use the conventional
+        GPU activity and Intel XPU keeps its native activity name.
+        """
+        if self._device_type == "npu":
+            return "NPU"
+        if self._device_type == "xpu":
+            return "XPU"
+        return "GPU"
+
+    def get_torch_profiler_activity(self) -> torch.profiler.ProfilerActivity:
+        """Return the torch profiler activity for the active accelerator."""
+        activity_name = self.get_torch_profiler_activity_str()
+        if activity_name == "NPU":
+            try:
+                import torch_npu
+            except ImportError as exc:
+                raise RuntimeError(
+                    "The Ascend profiler requires torch_npu to be installed"
+                ) from exc
+            return torch_npu.profiler.ProfilerActivity.NPU
+
+        torch_activity_name = "CUDA" if activity_name == "GPU" else activity_name
+        activity = getattr(
+            torch.profiler.ProfilerActivity, torch_activity_name, None
+        )
+        if activity is None:
+            raise RuntimeError(
+                f"torch profiler activity {activity_name!r} is unavailable "
+                f"for device type {self._device_type!r}"
+            )
+        return activity
+
     def get_torch_distributed_backend_str(self) -> str:
         return self._dist_backend
 
