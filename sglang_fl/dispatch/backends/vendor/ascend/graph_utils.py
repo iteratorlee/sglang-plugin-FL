@@ -46,3 +46,29 @@ def resolve_logical_batch_size(
         if original_batch_size is None
         else int(original_batch_size)
     )
+
+
+def find_graph_metadata_backends(attn_backend: object) -> list[object]:
+    """Return leaf attention backends that own per-batch graph metadata.
+
+    Hybrid linear-attention backends are wrappers and keep their graph state in
+    child backends.  Traverse ``attn_backend_list`` recursively while avoiding
+    duplicate children; ordinary Ascend backends are returned directly.
+    """
+
+    result: list[object] = []
+    visited: set[int] = set()
+
+    def visit(backend: object) -> None:
+        backend_id = id(backend)
+        if backend_id in visited:
+            return
+        visited.add(backend_id)
+
+        if hasattr(backend, "graph_metadata"):
+            result.append(backend)
+        for child in getattr(backend, "attn_backend_list", ()):
+            visit(child)
+
+    visit(attn_backend)
+    return result

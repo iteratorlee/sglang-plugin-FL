@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 
 def test_exact_decode_graph_env_is_opt_in(monkeypatch) -> None:
     from sglang_fl.dispatch.backends.vendor.ascend.graph_utils import (
@@ -40,3 +42,18 @@ def test_logical_batch_size_falls_back_for_warmup_none() -> None:
 
     assert resolve_logical_batch_size(None, 1) == 1
     assert resolve_logical_batch_size(4, 16) == 4
+
+
+def test_graph_metadata_backends_traverse_hybrid_children_once() -> None:
+    from sglang_fl.dispatch.backends.vendor.ascend.graph_utils import (
+        find_graph_metadata_backends,
+    )
+
+    full_attention = SimpleNamespace(graph_metadata={2: object()})
+    linear_attention = SimpleNamespace(state_indices_list=[])
+    nested = SimpleNamespace(
+        attn_backend_list=[full_attention, linear_attention, full_attention]
+    )
+    hybrid = SimpleNamespace(attn_backend_list=[nested])
+
+    assert find_graph_metadata_backends(hybrid) == [full_attention]

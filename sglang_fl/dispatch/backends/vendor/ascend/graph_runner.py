@@ -38,6 +38,7 @@ from sglang.srt.utils import get_cuda_graph_batch_size_alignment
 from sglang_fl.dispatch.backends.vendor.ascend.graph_utils import (
     align_capture_size,
     exact_decode_graph_enabled,
+    find_graph_metadata_backends,
     resolve_logical_batch_size,
 )
 
@@ -52,7 +53,7 @@ class AscendNPUGraphRunner(NPUGraphRunner):
         self._fl_logical_capture_size: Optional[int] = None
         self._fl_logical_replay_size: Optional[int] = None
         self._fl_attention_graph_metadata: dict[
-            tuple[int, Optional[int]], object
+            tuple[int, Optional[int]], tuple[tuple[object, object], ...]
         ] = {}
         super().__init__(*args, **kwargs)
 
@@ -106,8 +107,10 @@ class AscendNPUGraphRunner(NPUGraphRunner):
                 variant_label=variant_label,
             )
             attn_backend = self._attention_backend_for_stream(stream_idx)
-            self._fl_attention_graph_metadata[(size, stream_idx)] = (
-                attn_backend.graph_metadata[internal_size]
+            self._fl_attention_graph_metadata[(size, stream_idx)] = tuple(
+                (metadata_backend, metadata_backend.graph_metadata[internal_size])
+                for metadata_backend in find_graph_metadata_backends(attn_backend)
+                if internal_size in metadata_backend.graph_metadata
             )
             return result
         finally:
@@ -158,7 +161,6 @@ class AscendNPUGraphRunner(NPUGraphRunner):
         )
         internal_bs = align_capture_size(logical_bs, alignment)
         stream_idx = get_current_stream_idx() if self.enable_pdmux else None
-        attn_backend = self._attention_backend_for_stream(stream_idx)
         metadata_key = (logical_bs, stream_idx)
         if metadata_key not in self._fl_attention_graph_metadata:
             raise RuntimeError(
@@ -169,9 +171,10 @@ class AscendNPUGraphRunner(NPUGraphRunner):
         # Retain and restore each graph's own metadata tensors so their captured
         # device pointers remain live and the replay updater touches the right
         # storage.
-        attn_backend.graph_metadata[internal_bs] = (
-            self._fl_attention_graph_metadata[metadata_key]
-        )
+        for metadata_backend, metadata in self._fl_attention_graph_metadata[
+            metadata_key
+        ]:
+            metadata_backend.graph_metadata[internal_bs] = metadata
 
         original_capture_bs = self.capture_bs
         self._fl_logical_replay_size = logical_bs
