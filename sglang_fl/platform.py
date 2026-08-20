@@ -284,6 +284,12 @@ class PlatformFL(SRTPlatform):
 
     def get_dsa_kv_pool_cls(self) -> type:
         """Return the DSA KV pool introduced by recent SGLang versions."""
+        if self._device_type == "npu":
+            from sglang_fl.dispatch.backends.vendor.ascend.dsa_kv_pool import (
+                AscendDSATokenToKVPool,
+            )
+
+            return AscendDSATokenToKVPool
         from sglang.srt.mem_cache.memory_pool import DSATokenToKVPool
 
         return DSATokenToKVPool
