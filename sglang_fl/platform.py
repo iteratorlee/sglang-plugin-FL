@@ -249,11 +249,11 @@ class PlatformFL(SRTPlatform):
     def get_graph_runner_cls(self) -> type:
         """Return graph runner class for this platform."""
         if self._device_type == "npu":
-            from sglang.srt.hardware_backend.npu.graph_runner.npu_graph_runner import (
-                NPUGraphRunner,
+            from sglang_fl.dispatch.backends.vendor.ascend.graph_runner import (
+                AscendNPUGraphRunner,
             )
 
-            return NPUGraphRunner
+            return AscendNPUGraphRunner
         from sglang.srt.model_executor.runner.decode_cuda_graph_runner import (
             DecodeCudaGraphRunner,
         )

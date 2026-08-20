@@ -90,8 +90,8 @@ def test_cuda_like_platform_uses_sglang_cuda_graph_runner() -> None:
     assert _platform_for("musa").get_graph_runner_cls() is DecodeCudaGraphRunner
 
 
-def test_npu_platform_uses_sglang_npu_graph_runner() -> None:
-    """NPU selects SGLang's native NPUGraphRunner when the NPU package exists."""
+def test_npu_platform_uses_ascend_npu_graph_runner() -> None:
+    """NPU selects the FL adapter derived from SGLang's NPUGraphRunner."""
     try:
         from sglang.srt.hardware_backend.npu.graph_runner.npu_graph_runner import (
             NPUGraphRunner,
@@ -99,7 +99,9 @@ def test_npu_platform_uses_sglang_npu_graph_runner() -> None:
     except Exception as exc:  # pragma: no cover - depends on NPU dependencies
         pytest.skip(f"SGLang NPUGraphRunner unavailable in this environment: {exc}")
 
-    assert _platform_for("npu").get_graph_runner_cls() is NPUGraphRunner
+    graph_runner_cls = _platform_for("npu").get_graph_runner_cls()
+    assert issubclass(graph_runner_cls, NPUGraphRunner)
+    assert graph_runner_cls.__name__ == "AscendNPUGraphRunner"
 
 
 @pytest.mark.gpu
