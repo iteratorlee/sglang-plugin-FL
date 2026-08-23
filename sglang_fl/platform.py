@@ -75,6 +75,19 @@ def _get_device_detector():
     return DeviceDetector()
 
 
+def _detect_native_device() -> tuple[str, str, str, int]:
+    """Detect a torch device without importing FlagGems.
+
+    This path is used by the native SGLang baseline (``USE_FLAGGEMS=0``),
+    where PlatformFL supplies only the OOT device/platform contract.
+    """
+    if hasattr(torch, "npu") and torch.npu.is_available():
+        return "ascend", "npu", "NPU", torch.npu.device_count()
+    if torch.cuda.is_available():
+        return "nvidia", "cuda", "CUDA", torch.cuda.device_count()
+    raise RuntimeError("PlatformFL found no visible NPU or CUDA device")
+
+
 class PlatformFL(SRTPlatform):
     """FlagGems-based multi-chip platform for SGLang.
 
@@ -85,13 +98,30 @@ class PlatformFL(SRTPlatform):
 
     def __init__(self):
         super().__init__()
-        detector = _get_device_detector()
+        use_flag_gems = os.environ.get("USE_FLAGGEMS", "1").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if use_flag_gems:
+            detector = _get_device_detector()
+            device_info = (
+                detector.vendor_name,
+                detector.name,
+                detector.dispatch_key,
+                detector.device_count,
+            )
+        else:
+            device_info = _detect_native_device()
 
-        # Core device identity from FlagGems
-        self._vendor_name: str = detector.vendor_name  # "nvidia", "ascend", ...
-        self._device_type: str = detector.name  # "cuda", "npu", ...
-        self._dispatch_key: str = detector.dispatch_key  # "CUDA", "NPU", ...
-        self._device_count: int = detector.device_count
+        # Core device identity.  FlagGems supplies this in plugin mode; torch
+        # supplies the equivalent minimal contract for the native baseline.
+        (
+            self._vendor_name,
+            self._device_type,
+            self._dispatch_key,
+            self._device_count,
+        ) = device_info
 
         # Set class-level attributes expected by DeviceMixin
         self.device_name = self._device_type
@@ -104,12 +134,13 @@ class PlatformFL(SRTPlatform):
         self._dist_backend = self._resolve_dist_backend()
 
         # Set up torch backend device function
-        try:
-            from flag_gems.runtime import backend
+        if use_flag_gems:
+            try:
+                from flag_gems.runtime import backend
 
-            backend.set_torch_backend_device_fn(self._vendor_name)
-        except Exception:
-            pass
+                backend.set_torch_backend_device_fn(self._vendor_name)
+            except Exception:
+                pass
         logger.info(
             "PlatformFL initialized: vendor=%s, device=%s, dist_backend=%s, count=%d",
             self._vendor_name,

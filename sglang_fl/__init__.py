@@ -716,6 +716,23 @@ def activate_platform() -> str | None:
     or None if FlagGems DeviceDetector fails (no supported hardware).
     """
     try:
+        if not _parse_bool(os.environ.get("USE_FLAGGEMS", "1"), default=True):
+            # Native-baseline mode still needs the OOT platform to expose an
+            # Ascend device to SGLang, but must not import FlagGems merely to
+            # detect hardware.  Importing DeviceDetector initializes a large
+            # part of FlagGems in every TP worker and contaminates both startup
+            # behavior and the native-vs-plugin comparison.
+            if hasattr(torch, "npu") and torch.npu.is_available():
+                logger.info("sglang_fl platform activating: vendor=ascend, device=npu")
+                return "sglang_fl.platform:PlatformFL"
+            if torch.cuda.is_available():
+                logger.info("sglang_fl platform activating: vendor=nvidia, device=cuda")
+                return "sglang_fl.platform:PlatformFL"
+            logger.warning(
+                "sglang_fl native platform activation failed: no visible NPU/CUDA device"
+            )
+            return None
+
         try:
             # FlagGems<=5.0.2: DeviceDetector lives in device.
             from flag_gems.runtime.backend.device import DeviceDetector
