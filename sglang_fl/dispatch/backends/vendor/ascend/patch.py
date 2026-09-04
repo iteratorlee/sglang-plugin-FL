@@ -10,6 +10,7 @@ Huawei NPU:
 import logging
 
 from .patches.attention_registry import patch_attn_backend_wrapper
+from .patches.qwen36_causal_conv import patch_qwen36_causal_conv_prefill
 from .patches.qwen_vl_processor import patch_qwen_vl_processor
 from .patches.scheduler_pp import (
     patch_pp_launch_batch_sync,
@@ -31,5 +32,6 @@ def apply_ascend_patches() -> None:
     patch_pp_launch_batch_sync()
     patch_attn_backend_wrapper()
     patch_qwen_vl_processor()
+    patch_qwen36_causal_conv_prefill()
 
 apply_ascend_patches()
