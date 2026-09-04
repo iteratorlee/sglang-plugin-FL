@@ -28,6 +28,9 @@ prefer: flagos
 # conv1d was already in main's list (it stays); it is needed because the flag_gems
 # triton conv1d/conv2d autotuner crashes (aicore exception) on Qwen3.6-35B-A3B
 # causal_conv1d shapes.
+# sum_dim is used by the Qwen3.6 causal-conv fallback once per GDN layer.  The
+# native Ascend reduction is faster than the FlagGems generic reduction for its
+# small-last-dimension shapes, so keep this ATen op out of FlagGems by default.
 flagos_blacklist:
   - full_like
   - index_copy_
@@ -41,6 +44,7 @@ flagos_blacklist:
   - index
   - add_
   - conv1d
+  - sum_dim
   - floor_divide
   - true_divide_
   - addmm

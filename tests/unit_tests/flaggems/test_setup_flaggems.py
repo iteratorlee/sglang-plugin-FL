@@ -236,6 +236,25 @@ def test_yaml_flagos_blacklist_is_default_when_env_blacklist_absent(
     ]
 
 
+def test_ascend_default_flagos_blacklist_excludes_sum_dim(
+    sglang_fl_module,
+    fake_flag_gems,
+) -> None:
+    from sglang_fl.dispatch.config import load_platform_config
+
+    config = load_platform_config("ascend")
+    assert config is not None
+
+    sglang_fl_module._setup_flaggems(config)
+
+    assert len(fake_flag_gems.calls) == 1
+    method, kwargs = fake_flag_gems.calls[0]
+    assert method == "enable"
+    assert "sum_dim" in kwargs["unused"]
+    assert kwargs["record"] is False
+    assert kwargs["once"] is True
+
+
 def test_env_blacklist_overrides_yaml_flagos_blacklist(
     monkeypatch,
     sglang_fl_module,
