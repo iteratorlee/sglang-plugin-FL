@@ -5,12 +5,15 @@ Huawei NPU:
   - scheduler_pp: PP send/recv ordering + stream syncs (HCCL deadlock fix)
   - attention_registry: defer CUDA-only linear-attn backend imports on NPU
   - qwen_vl_processor: transformers-version-compatible Qwen-VL preprocess
+  - qwen36_causal_conv: batch equal-length multi-sequence prefill calls
+  - qwen36_causal_conv_single: skip singleton wrapper list/cat on prefill
 """
 
 import logging
 
 from .patches.attention_registry import patch_attn_backend_wrapper
 from .patches.qwen36_causal_conv import patch_qwen36_causal_conv_prefill
+from .patches.qwen36_causal_conv_single import patch_qwen36_causal_conv_single
 from .patches.qwen_vl_processor import patch_qwen_vl_processor
 from .patches.scheduler_pp import (
     patch_pp_launch_batch_sync,
@@ -33,5 +36,7 @@ def apply_ascend_patches() -> None:
     patch_attn_backend_wrapper()
     patch_qwen_vl_processor()
     patch_qwen36_causal_conv_prefill()
+    patch_qwen36_causal_conv_single()
+
 
 apply_ascend_patches()
