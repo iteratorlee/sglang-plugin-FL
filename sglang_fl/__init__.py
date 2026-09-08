@@ -730,7 +730,7 @@ def activate_platform() -> str | None:
     try:
         # AutoConfig and ModelRegistry are consulted before the general plugin
         # hook during server startup, so out-of-tree models register here.
-        from sglang_fl.models.register import register_glm5_next
+        from sglang_fl.models.glm_53_flash.register import register_glm5_next
 
         register_glm5_next()
     except Exception as e:
@@ -777,7 +777,7 @@ def load_plugin():
     if _is_rank0():
         logger.info("sglang_fl plugin loading")
 
-    from sglang_fl.models.register import apply_glm5_patches
+    from sglang_fl.models.glm_53_flash.register import apply_glm5_patches
 
     apply_glm5_patches()
 

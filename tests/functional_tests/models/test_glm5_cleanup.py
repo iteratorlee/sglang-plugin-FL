@@ -26,12 +26,32 @@ def _count_named_calls(function, name: str) -> int:
     )
 
 
+def test_glm5_external_package_discovers_relocated_model():
+    """SGLang 0.5.11 scans modules, not nested model packages."""
+
+    from sglang.srt.models.registry import ModelRegistry, import_model_classes
+    from sglang_fl.models.glm_53_flash import register
+    from sglang_fl.models.glm_53_flash.glm5_next import (
+        Glm5NextForConditionalGeneration,
+    )
+
+    package = "sglang_fl.models.glm_53_flash"
+    architecture = "Glm5NextForConditionalGeneration"
+    assert register.__package__ == package
+    assert Glm5NextForConditionalGeneration.__module__ == f"{package}.glm5_next"
+    discovered = import_model_classes(package, strict=True)
+    assert discovered[architecture] is Glm5NextForConditionalGeneration
+    model_class, model_architecture = ModelRegistry.resolve_model_cls(architecture)
+    assert model_class is Glm5NextForConditionalGeneration
+    assert model_architecture == architecture
+
+
 def test_glm5_cleanup_does_not_replace_global_deepseek_indexer():
     """The explicit GLM decoder replacement must not mutate other models."""
 
     import sglang.srt.models.deepseek_v2 as deepseek_v2
     from sglang.srt.layers.attention.nsa.nsa_indexer import Indexer
-    from sglang_fl.models.register import patch_deepseek_dsa_compat
+    from sglang_fl.models.glm_53_flash.register import patch_deepseek_dsa_compat
 
     original_init = deepseek_v2.DeepseekV2AttentionMLA.__init__
     for _ in range(2):
@@ -43,7 +63,7 @@ def test_glm5_cleanup_does_not_replace_global_deepseek_indexer():
 def test_glm5_decoder_contains_one_explicit_kpool_construction():
     """Catch reintroduction of a second GLM-owned KPool construction path."""
 
-    from sglang_fl.models.glm5_next import Glm5NextDecoderLayer
+    from sglang_fl.models.glm_53_flash.glm5_next import Glm5NextDecoderLayer
 
     assert _count_named_calls(Glm5NextDecoderLayer.__init__, "_build_glm_kpool_indexer") == 1
 
@@ -86,7 +106,7 @@ class _CountingMLP(nn.Module):
 def test_glm5_decoder_calls_dense_and_moe_mlp_once(monkeypatch):
     """The merged dense/MoE call site must preserve one invocation per layer."""
 
-    import sglang_fl.models.glm5_next as model_module
+    import sglang_fl.models.glm_53_flash.glm5_next as model_module
 
     class _CountingMoE(model_module.Glm5NextMoE):
         def __init__(self):

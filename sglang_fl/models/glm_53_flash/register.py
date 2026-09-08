@@ -23,7 +23,7 @@ def register_glm5_next() -> None:
 
     # ModelRegistry reads this environment variable when its module is first
     # imported.  The external package contains EntryClass in glm5_next.py.
-    os.environ.setdefault("SGLANG_EXTERNAL_MODEL_PACKAGE", "sglang_fl.models")
+    os.environ.setdefault("SGLANG_EXTERNAL_MODEL_PACKAGE", __package__)
     for model_type, cls in (
         ("glm5_next", Glm5NextConfig),
         ("glm5_next_text", Glm5NextTextConfig),
@@ -49,7 +49,7 @@ def register_glm5_next() -> None:
         register_linear_attn_model(
             LinearAttnModelSpec(
                 config_class=Glm5NextTextConfig,
-                backend_class_name=("sglang_fl.models.ascend_kda.AscendKDAAttnBackend"),
+                backend_class_name=f"{__package__}.ascend_kda.AscendKDAAttnBackend",
                 arch_names=["Glm5NextForConditionalGeneration"],
                 uses_mamba_radix_cache=True,
                 support_mamba_cache=True,

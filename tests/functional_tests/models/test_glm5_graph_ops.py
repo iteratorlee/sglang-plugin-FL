@@ -7,20 +7,27 @@ import torch
 def test_glm5_registers_v0511_hybrid_kda_backend():
     """The external model must select HybridLinearAttnBackend, not plain MLA."""
 
+    from importlib import import_module
+
     from sglang.srt.configs.linear_attn_model_registry import (
         get_linear_attn_spec_by_arch,
     )
-    from sglang_fl.models.register import register_glm5_next
+    from sglang_fl.models.glm_53_flash.ascend_kda import AscendKDAAttnBackend
+    from sglang_fl.models.glm_53_flash.register import register_glm5_next
 
     register_glm5_next()
     spec = get_linear_attn_spec_by_arch("Glm5NextForConditionalGeneration")
     assert spec is not None
-    assert spec.backend_class_name.endswith("AscendKDAAttnBackend")
+    assert spec.backend_class_name == (
+        "sglang_fl.models.glm_53_flash.ascend_kda.AscendKDAAttnBackend"
+    )
+    module_name, _, class_name = spec.backend_class_name.rpartition(".")
+    assert getattr(import_module(module_name), class_name) is AscendKDAAttnBackend
     assert spec.unwrap_text_config
 
 
 def test_glm5_config_bootstraps_v0511_mla_and_nsa_markers():
-    from sglang_fl.models.glm5_next_config import Glm5NextConfig
+    from sglang_fl.models.glm_53_flash.glm5_next_config import Glm5NextConfig
 
     config = Glm5NextConfig(
         text_config={
@@ -41,7 +48,7 @@ def test_glm5_config_bootstraps_v0511_mla_and_nsa_markers():
 
 
 def test_glm5_kpool_builder_matches_checkpoint_contract(monkeypatch):
-    import sglang_fl.models.glm5_next as model_module
+    import sglang_fl.models.glm_53_flash.glm5_next as model_module
 
     captured = {}
 
@@ -85,7 +92,7 @@ def test_glm5_kpool_builder_matches_checkpoint_contract(monkeypatch):
 def test_glm5_kpool_head_gate_is_persistent_fp32_with_stable_topk(monkeypatch):
     import torch.nn.functional as F
 
-    import sglang_fl.models.kpool_indexer as kpool_module
+    import sglang_fl.models.glm_53_flash.kpool_indexer as kpool_module
 
     class FakeReplicatedLinear(torch.nn.Module):
         def __init__(
@@ -166,7 +173,7 @@ def test_glm5_kpool_head_gate_is_persistent_fp32_with_stable_topk(monkeypatch):
 
 
 def test_glm5_lightning_indexer_cast_is_only_at_operator_boundary():
-    from sglang_fl.models.kpool_indexer import _ascend_lightning_weights
+    from sglang_fl.models.glm_53_flash.kpool_indexer import _ascend_lightning_weights
 
     fp32_weights = torch.tensor([[1.25, -0.75]], dtype=torch.float32)
     query = torch.empty(1, 2, 128, dtype=torch.bfloat16)
@@ -180,7 +187,7 @@ def test_glm5_lightning_indexer_cast_is_only_at_operator_boundary():
 
 
 def test_glm5_kpool_indices_match_ascend_sparse_attention_abi():
-    from sglang_fl.models.kpool_indexer import _as_ascend_sparse_indices
+    from sglang_fl.models.glm_53_flash.kpool_indexer import _as_ascend_sparse_indices
 
     logical = torch.arange(2 * 11, dtype=torch.int32).view(2, 11)
     physical = _as_ascend_sparse_indices(logical)
@@ -196,7 +203,7 @@ def test_glm5_kpool_indices_match_ascend_sparse_attention_abi():
 
 
 def test_glm5_moe_scopes_bf16_deepep_dispatch_on_npu(monkeypatch):
-    import sglang_fl.models.glm5_next as model_module
+    import sglang_fl.models.glm_53_flash.glm5_next as model_module
     from sglang.srt.environ import envs
 
     seen = []
@@ -219,7 +226,7 @@ def test_glm5_moe_scopes_bf16_deepep_dispatch_on_npu(monkeypatch):
 
 
 def test_glm5_moe_topk_uses_loaded_gate_correction_bias():
-    from sglang_fl.models.glm5_next import _rebind_glm_moe_correction_bias
+    from sglang_fl.models.glm_53_flash.glm5_next import _rebind_glm_moe_correction_bias
 
     stale = torch.nn.Parameter(torch.empty(288, dtype=torch.float32))
     loaded = torch.nn.Parameter(torch.arange(288, dtype=torch.float32))
@@ -239,8 +246,8 @@ def test_glm5_moe_topk_uses_loaded_gate_correction_bias():
 
 
 def test_glm5_decode_uses_plugin_bounded_varlen_kernel(monkeypatch):
-    import sglang_fl.models.kda_recurrent_npu as recurrent_module
-    from sglang_fl.models.ascend_kda import _ascend_kda_decode
+    import sglang_fl.models.glm_53_flash.kda_recurrent_npu as recurrent_module
+    from sglang_fl.models.glm_53_flash.ascend_kda import _ascend_kda_decode
 
     calls = []
 
@@ -275,7 +282,7 @@ def test_glm5_decode_uses_plugin_bounded_varlen_kernel(monkeypatch):
 def test_glm5_kda_prefill_uses_npu_causal_conv(monkeypatch):
     import sgl_kernel_npu.mamba.causal_conv1d as npu_conv
 
-    from sglang_fl.models.ascend_kda import _ascend_kda_prefill_conv
+    from sglang_fl.models.glm_53_flash.ascend_kda import _ascend_kda_prefill_conv
 
     seen = {}
 
@@ -311,7 +318,7 @@ def test_glm5_kda_prefill_uses_npu_causal_conv(monkeypatch):
 
 
 def test_glm5_kda_gate_layout_and_activation_match_v0511_contract():
-    from sglang_fl.models.glm5_next import _prepare_glm_kda_gates
+    from sglang_fl.models.glm_53_flash.glm5_next import _prepare_glm_kda_gates
 
     raw_gate = torch.arange(22 * 512, dtype=torch.bfloat16).view(22, 512) / 512
     raw_beta = torch.linspace(-3, 3, 22 * 4, dtype=torch.bfloat16).view(22, 4)
@@ -336,8 +343,8 @@ def test_glm5_kda_gate_layout_and_activation_match_v0511_contract():
 
 
 def test_glm5_kda_prefill_recurrent_uses_active_tokens_and_zero_pads(monkeypatch):
-    import sglang_fl.models.ascend_kda as kda_module
-    import sglang_fl.models.kda_recurrent_npu as recurrent_module
+    import sglang_fl.models.glm_53_flash.ascend_kda as kda_module
+    import sglang_fl.models.glm_53_flash.kda_recurrent_npu as recurrent_module
 
     calls = []
 
@@ -411,7 +418,7 @@ def test_glm5_kda_prefill_recurrent_uses_active_tokens_and_zero_pads(monkeypatch
 
 
 def test_glm5_pool_index_dimension_context_is_scoped(monkeypatch):
-    import sglang_fl.models.register as register_module
+    import sglang_fl.models.glm_53_flash.register as register_module
     from sglang.srt.model_executor.model_runner_kv_cache_mixin import (
         ModelRunnerKVCacheMixin,
     )
@@ -452,7 +459,7 @@ def test_glm5_pool_selection_uses_hybrid_not_packed_nsa():
 
     import sglang.srt.models.deepseek_v2 as dsv2
     from sglang.srt.model_executor import model_runner_kv_cache_mixin
-    from sglang_fl.models.register import (
+    from sglang_fl.models.glm_53_flash.register import (
         patch_deepseek_dsa_compat,
         patch_glm5_pool_context,
     )
@@ -479,7 +486,7 @@ def test_glm5_pool_selection_uses_hybrid_not_packed_nsa():
 def test_glm5_pool_runtime_check_accepts_tensor_index_cache(monkeypatch):
     """The Ascend MLA index cache is one tensor, not a Python list."""
 
-    import sglang_fl.models.register as register_module
+    import sglang_fl.models.glm_53_flash.register as register_module
     from sglang.srt.model_executor.model_runner_kv_cache_mixin import (
         ModelRunnerKVCacheMixin,
     )
@@ -510,8 +517,8 @@ def test_glm5_pool_runtime_check_accepts_tensor_index_cache(monkeypatch):
 
 
 def test_glm5_ascend_kda_rejects_unverified_modes(monkeypatch):
-    from sglang_fl.models.ascend_kda import AscendKDAAttnBackend
-    import sglang_fl.models.ascend_kda as kda_module
+    from sglang_fl.models.glm_53_flash.ascend_kda import AscendKDAAttnBackend
+    import sglang_fl.models.glm_53_flash.ascend_kda as kda_module
 
     class _SpecAlgorithm:
         def __init__(self, is_none):
@@ -566,7 +573,7 @@ def test_glm5_ascend_kda_rejects_unverified_modes(monkeypatch):
 
 
 def test_glm5_ascend_kda_conv_cache_layout_is_zero_copy():
-    from sglang_fl.models.ascend_kda import _physical_npu_conv_state
+    from sglang_fl.models.glm_53_flash.ascend_kda import _physical_npu_conv_state
 
     physical = torch.arange(2 * 12 * 3).view(2, 12, 3)
     validated = _physical_npu_conv_state(physical, kernel_width=4)
@@ -578,7 +585,7 @@ def test_glm5_ascend_kda_conv_cache_layout_is_zero_copy():
 
 
 def test_glm5_ascend_kda_decode_rejects_invalid_static_contract():
-    from sglang_fl.models.ascend_kda import _ascend_kda_decode
+    from sglang_fl.models.glm_53_flash.ascend_kda import _ascend_kda_decode
 
     inputs = {
         "q": torch.empty(1, 2, 4, 8),
@@ -605,8 +612,8 @@ def test_glm5_ascend_kda_decode_rejects_invalid_static_contract():
 def test_glm5_kda_prefill_uses_one_varlen_kernel_and_preserves_padding(
     monkeypatch,
 ):
-    from sglang_fl.models.ascend_kda import _ascend_kda_prefill_recurrent
-    import sglang_fl.models.kda_recurrent_npu as recurrent_module
+    from sglang_fl.models.glm_53_flash.ascend_kda import _ascend_kda_prefill_recurrent
+    import sglang_fl.models.glm_53_flash.kda_recurrent_npu as recurrent_module
 
     calls = []
 
@@ -645,7 +652,7 @@ def test_glm5_kda_prefill_uses_one_varlen_kernel_and_preserves_padding(
 
 
 def test_glm5_kpool_chunked_prefill_matches_one_shot(monkeypatch):
-    import sglang_fl.models.kpool_indexer as kpool_module
+    import sglang_fl.models.glm_53_flash.kpool_indexer as kpool_module
 
     def eager_scatter(dst, rows, src):
         dst.reshape(-1, dst.shape[-1])[rows.long()] = src
@@ -712,7 +719,7 @@ def test_glm5_kpool_chunked_prefill_matches_one_shot(monkeypatch):
 
 
 def test_glm5_kpool_prefill_topk_is_chunk_invariant(monkeypatch):
-    import sglang_fl.models.kpool_indexer as kpool_module
+    import sglang_fl.models.glm_53_flash.kpool_indexer as kpool_module
 
     indexer = kpool_module.IndexerKPool.__new__(kpool_module.IndexerKPool)
     torch.nn.Module.__init__(indexer)
@@ -773,7 +780,7 @@ def test_glm5_kda_multitoken_varlen_matches_fp32_reference(device):
     if device.type != "npu":
         pytest.skip("GLM-5.3 fused long-prefill KDA is Ascend-specific")
 
-    from sglang_fl.models.kda_recurrent_npu import (
+    from sglang_fl.models.glm_53_flash.kda_recurrent_npu import (
         glm_kda_varlen_recurrent_npu,
     )
 
@@ -859,7 +866,7 @@ def test_glm5_rms_norm_gated_is_chunk_invariant_and_graph_safe(device):
     if device.type != "npu":
         pytest.skip("GLM-5.3 gated RMSNorm row kernel is Ascend-specific")
 
-    from sglang_fl.models.rms_norm_gated_npu import glm_rms_norm_gated_npu
+    from sglang_fl.models.glm_53_flash.rms_norm_gated_npu import glm_rms_norm_gated_npu
 
     torch.manual_seed(20260905)
     eps = 1e-5
@@ -915,7 +922,7 @@ def test_glm5_rms_norm_gated_is_chunk_invariant_and_graph_safe(device):
 
 
 def test_glm5_v0511_attention_context_cleanup():
-    from sglang_fl.models.compat import clear_attn_inputs, set_attn_hidden_states_local
+    from sglang_fl.models.glm_53_flash.compat import clear_attn_inputs, set_attn_hidden_states_local
 
     attn_inputs = SimpleNamespace(hidden_states_local=None)
     old_context = SimpleNamespace(attn_inputs_=attn_inputs)
@@ -927,7 +934,7 @@ def test_glm5_v0511_attention_context_cleanup():
 
 
 def test_glm5_v0511_no_rope_dsa_prepare_contract():
-    from sglang_fl.models.ascend_dsa import forward_glm5_dsa_prepare_npu
+    from sglang_fl.models.glm_53_flash.ascend_dsa import forward_glm5_dsa_prepare_npu
 
     tokens = 3
     fused = torch.arange(tokens * 7, dtype=torch.float32).view(tokens, 7)
@@ -970,7 +977,7 @@ def test_glm5_v0511_no_rope_dsa_prepare_contract():
 
 
 def test_glm5_physical_zero_rope_is_shape_only():
-    from sglang_fl.models.ascend_dsa import physical_zero_rope
+    from sglang_fl.models.glm_53_flash.ascend_dsa import physical_zero_rope
 
     q_logical = torch.empty(3, 2, 0, dtype=torch.bfloat16)
     k_logical = torch.empty(3, 1, 0, dtype=torch.bfloat16)
@@ -983,7 +990,7 @@ def test_glm5_physical_zero_rope_is_shape_only():
 
 
 def test_glm5_kpool_bridges_torch_npu_false_cuda_dispatch(monkeypatch):
-    import sglang_fl.models.kpool_indexer as kpool_module
+    import sglang_fl.models.glm_53_flash.kpool_indexer as kpool_module
 
     IndexerKPool = kpool_module.IndexerKPool
 
@@ -1005,7 +1012,7 @@ def test_glm5_kpool_bridges_torch_npu_false_cuda_dispatch(monkeypatch):
 
 
 def test_glm5_kpool_resolves_hybrid_mla_metadata():
-    from sglang_fl.models.kpool_indexer import _get_full_attn_metadata
+    from sglang_fl.models.glm_53_flash.kpool_indexer import _get_full_attn_metadata
 
     metadata = SimpleNamespace(block_tables=object())
     full_backend = SimpleNamespace(forward_metadata=metadata)
@@ -1016,7 +1023,7 @@ def test_glm5_kpool_resolves_hybrid_mla_metadata():
 
 
 def test_glm5_kpool_resolves_hybrid_index_cache_and_layer_mapping():
-    from sglang_fl.models.kpool_indexer import _get_index_k_buffer
+    from sglang_fl.models.glm_53_flash.kpool_indexer import _get_index_k_buffer
 
     expected = object()
     calls = []
@@ -1042,7 +1049,7 @@ def test_glm5_kpool_resolves_hybrid_index_cache_and_layer_mapping():
 
 
 def test_glm5_router_is_fp32_reference():
-    from sglang_fl.models.glm5_next import Glm5NextMoEGate
+    from sglang_fl.models.glm_53_flash.glm5_next import Glm5NextMoEGate
 
     gate = object.__new__(Glm5NextMoEGate)
     torch.nn.Module.__init__(gate)
@@ -1068,7 +1075,7 @@ def test_glm5_dynamic_cache_scatter_replays_current_rows(device):
     if device.type != "npu":
         pytest.skip("GLM-5.3 graph-safe scatter is Ascend-specific")
 
-    from sglang_fl.models.graph_ops import scatter_rows_
+    from sglang_fl.models.glm_53_flash.graph_ops import scatter_rows_
 
     cache = torch.zeros((16, 8), dtype=torch.bfloat16, device=device)
     static_rows = torch.zeros((1,), dtype=torch.int64, device=device)
@@ -1100,7 +1107,7 @@ def test_glm5_dynamic_tail_scatter_crosses_kpool_boundary(device):
     if device.type != "npu":
         pytest.skip("GLM-5.3 graph-safe scatter is Ascend-specific")
 
-    from sglang_fl.models.graph_ops import scatter_rows_
+    from sglang_fl.models.glm_53_flash.graph_ops import scatter_rows_
 
     kpool = 4
     tail = torch.zeros((3, kpool, 4), dtype=torch.float32, device=device)
@@ -1135,7 +1142,7 @@ def test_glm5_graph_cache_and_topk_match_eager_across_pool_boundaries(device):
     if device.type != "npu":
         pytest.skip("GLM-5.3 graph-safe scatter is Ascend-specific")
 
-    from sglang_fl.models.graph_ops import scatter_rows_
+    from sglang_fl.models.glm_53_flash.graph_ops import scatter_rows_
 
     width = 8
     initial = -torch.arange(16, dtype=torch.float32, device=device).view(-1, 1)

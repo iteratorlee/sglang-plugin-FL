@@ -7,15 +7,15 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from sglang_fl.models.mhc import hc_post as _hc_post_fn
-from sglang_fl.models.mhc import hc_pre as _hc_pre_fn
+from .mhc import hc_post as _hc_post_fn
+from .mhc import hc_pre as _hc_pre_fn
 from sglang.srt.batch_overlap.two_batch_overlap import (
     model_forward_maybe_tbo,
 )
-from sglang_fl.models.glm5_next_config import Glm5NextConfig, Glm5NextTextConfig
-from sglang_fl.models.kpool_indexer import IndexerKPool
-from sglang_fl.models.rms_norm_gated_npu import Glm5RMSNormGated
-from sglang_fl.models.compat import is_deepseek_dsa
+from .glm5_next_config import Glm5NextConfig, Glm5NextTextConfig
+from .kpool_indexer import IndexerKPool
+from .rms_norm_gated_npu import Glm5RMSNormGated
+from .compat import is_deepseek_dsa
 from sglang.srt.distributed.parallel_state import get_pp_group
 from sglang.srt.distributed.utils import divide
 from sglang.srt.environ import envs
@@ -23,8 +23,8 @@ from sglang.srt.eplb.expert_distribution import (
     get_global_expert_distribution_recorder,
 )
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
-from sglang_fl.models.compat import vision_utils
-from sglang_fl.models.compat import (
+from .compat import vision_utils
+from .compat import (
     can_dsa_cp_split,
     cp_plain_all_gather,
     cp_plain_reduce_scatter,
@@ -41,9 +41,9 @@ from sglang.srt.layers.communicator import (
     enable_moe_dense_fully_dp,
     get_attn_tp_context,
 )
-from sglang_fl.models.mhc_communicator import DSACPLayerCommunicator
-from sglang_fl.models.mhc_communicator import MHCLayerCommunicator
-from sglang_fl.models.mhc_communicator import (
+from .mhc_communicator import DSACPLayerCommunicator
+from .mhc_communicator import MHCLayerCommunicator
+from .mhc_communicator import (
     MHCHybridDSACPLayerCommunicator,
 )
 from sglang.srt.layers.layernorm import RMSNorm
@@ -69,7 +69,7 @@ from sglang.srt.layers.utils.cp_utils import (
     is_prefill_context_parallel_enabled,
     prepare_context_parallel_metadata,
 )
-from sglang_fl.models.compat import mla_use_prefill_cp
+from .compat import mla_use_prefill_cp
 from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -79,7 +79,7 @@ from sglang.srt.managers.mm_utils import (
     general_mm_embed_routine,
 )
 from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
-from sglang_fl.models.compat import (
+from .compat import (
     Backend,
     Phase,
     check_cuda_graph_backend,
@@ -115,7 +115,7 @@ from sglang.srt.models.glm_ocr import (
     GlmOcrVisionPatchMerger,
 )
 from sglang.srt.multimodal.mm_utils import run_dp_sharded_mrope_vision_model
-from sglang_fl.models.compat import get_forward, get_parallel, get_server_args
+from .compat import get_forward, get_parallel, get_server_args
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.utils import is_npu
