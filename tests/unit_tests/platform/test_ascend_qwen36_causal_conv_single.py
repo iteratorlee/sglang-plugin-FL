@@ -21,16 +21,16 @@ from unittest import mock
 import torch
 
 from sglang_fl.dispatch.backends.vendor.ascend.patches import (
-    qwen36_causal_conv_single as conv_single,
+    qwen36_causal_conv as conv_single,
 )
 
 _SingleSequenceMetadata = conv_single._SingleSequenceMetadata
-_get_single_sequence_metadata = conv_single._get_single_sequence_metadata
+_get_single_sequence_metadata = conv_single._get_prefill_metadata
 _make_optimized_causal_conv1d_fn = conv_single._make_optimized_causal_conv1d_fn
 _native_api_supported = conv_single._native_api_supported
 _BACKEND_MODULE = conv_single._BACKEND_MODULE
 _run_single_sequence = conv_single._run_single_sequence
-patch_qwen36_causal_conv_single = conv_single.patch_qwen36_causal_conv_single
+patch_qwen36_causal_conv_prefill = conv_single.patch_qwen36_causal_conv_prefill
 
 
 def _target_inputs(dim: int = 5120, valid_tokens: int = 5, tail: int = 0):
@@ -185,9 +185,25 @@ def test_target_b1_wrapper_calls_native_once():
     def upstream(*args, **kwargs):
         raise AssertionError("upstream wrapper must not run for the target B=1 path")
 
-    def native(*args, **kwargs):
-        native_calls.append((args, kwargs))
-        return args[0], kwargs["final_states_out"]
+    def native(
+        *args,
+        initial_states=None,
+        return_final_states=False,
+        final_states_out=None,
+        activation=None,
+    ):
+        native_calls.append(
+            (
+                args,
+                {
+                    "initial_states": initial_states,
+                    "return_final_states": return_final_states,
+                    "final_states_out": final_states_out,
+                    "activation": activation,
+                },
+            )
+        )
+        return args[0], final_states_out
 
     args = _target_inputs()
     optimized = _make_optimized_causal_conv1d_fn(upstream, native)
@@ -214,11 +230,15 @@ def test_target_b1_wrapper_calls_native_once():
     assert native_kwargs["activation"] == "silu"
 
 
-def test_native_api_missing_final_states_out_safe_skips_patch():
+def test_native_api_missing_final_states_out_falls_back_only_for_single():
     import sgl_kernel_npu.mamba as mamba
 
+    sentinel = object()
+    calls = []
+
     def upstream(*args, **kwargs):
-        return None
+        calls.append((args, kwargs))
+        return sentinel
 
     def native_without_final_states_out(
         x,
@@ -241,16 +261,45 @@ def test_native_api_missing_final_states_out_safe_skips_patch():
     )
     with (
         mock.patch.object(mamba, "causal_conv1d", causal_conv, create=True),
-        mock.patch.dict(
-            sys.modules, {_BACKEND_MODULE: backend}
-        ),
+        mock.patch.dict(sys.modules, {_BACKEND_MODULE: backend}),
     ):
         assert not _native_api_supported(native_without_final_states_out)
-        assert patch_qwen36_causal_conv_single() is False
+        assert patch_qwen36_causal_conv_prefill() is True
+        optimized = causal_conv.causal_conv1d_fn_npu
+        args = _target_inputs()
+        assert (
+            optimized(
+                *args[:3],
+                query_start_loc=args[3],
+                cache_indices=args[4],
+                has_initial_state=args[5],
+                conv_states=args[6],
+                seq_lens_cpu=args[9],
+            )
+            is sentinel
+        )
+        assert len(calls) == 1
+        assert backend.causal_conv1d_fn_npu is optimized
+        assert backend.causal_conv1d_fn is optimized
+        # The same native API still supports multi-sequence batching.
+        from sglang_fl.dispatch.backends.vendor.ascend.patches import qwen36_causal_conv
 
-    assert causal_conv.causal_conv1d_fn_npu is upstream
-    assert backend.causal_conv1d_fn_npu is upstream
-    assert backend.causal_conv1d_fn is upstream
+        with mock.patch.object(
+            qwen36_causal_conv, "_run_equal_length_batched", return_value="batched"
+        ):
+            assert (
+                optimized(
+                    args[0],
+                    args[1],
+                    query_start_loc=torch.tensor([0, 2, 4], dtype=torch.int32),
+                    cache_indices=torch.tensor([0, 1]),
+                    has_initial_state=torch.tensor([False, False]),
+                    conv_states=args[6],
+                    seq_lens_cpu=[2, 2],
+                )
+                == "batched"
+            )
+        assert len(calls) == 1
 
 
 def test_patch_rebinds_loaded_backend_aliases_and_is_idempotent():
@@ -281,15 +330,13 @@ def test_patch_rebinds_loaded_backend_aliases_and_is_idempotent():
     )
     with (
         mock.patch.object(mamba, "causal_conv1d", causal_conv, create=True),
-        mock.patch.dict(
-            sys.modules, {_BACKEND_MODULE: backend}
-        ),
+        mock.patch.dict(sys.modules, {_BACKEND_MODULE: backend}),
     ):
-        assert patch_qwen36_causal_conv_single() is True
+        assert patch_qwen36_causal_conv_prefill() is True
         optimized = causal_conv.causal_conv1d_fn_npu
         assert backend.causal_conv1d_fn_npu is optimized
         assert backend.causal_conv1d_fn is optimized
-        assert patch_qwen36_causal_conv_single() is True
+        assert patch_qwen36_causal_conv_prefill() is True
         assert causal_conv.causal_conv1d_fn_npu is optimized
         assert backend.causal_conv1d_fn_npu is optimized
         assert backend.causal_conv1d_fn is optimized

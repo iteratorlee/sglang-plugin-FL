@@ -18,7 +18,8 @@ import torch
 
 from sglang_fl.dispatch.backends.vendor.ascend.patches.qwen36_causal_conv import (
     _BatchMetadata,
-    _get_batch_metadata,
+    _SingleSequenceMetadata,
+    _get_prefill_metadata,
     _make_optimized_causal_conv1d_fn,
     _run_equal_length_batched,
 )
@@ -62,17 +63,11 @@ def _run_cpu_equivalence(use_initial_state: bool, trailing_tokens: int) -> None:
     torch.manual_seed(17)
     batch, dim, seq_len, width = 3, 8, 5, 4
     valid_tokens = batch * seq_len
-    x = torch.randn(
-        dim, valid_tokens + trailing_tokens, dtype=torch.bfloat16
-    )
+    x = torch.randn(dim, valid_tokens + trailing_tokens, dtype=torch.bfloat16)
     weight = torch.randn(dim, width, dtype=torch.bfloat16)
-    query_start_loc = torch.arange(
-        0, valid_tokens + 1, seq_len, dtype=torch.int32
-    )
+    query_start_loc = torch.arange(0, valid_tokens + 1, seq_len, dtype=torch.int32)
     cache_indices = torch.tensor([2, 0, 3], dtype=torch.int64)
-    has_initial_state = torch.full(
-        (batch,), use_initial_state, dtype=torch.bool
-    )
+    has_initial_state = torch.full((batch,), use_initial_state, dtype=torch.bool)
     base_states = torch.randn(5, dim, width - 1, dtype=torch.bfloat16)
 
     expected_states = base_states.clone()
@@ -137,8 +132,8 @@ def _target_inputs(dim: int = 5120):
 
 
 def test_shape_guards_accept_both_qwen36_models() -> None:
-    assert _get_batch_metadata(*_target_inputs(5120)) is not None
-    assert _get_batch_metadata(*_target_inputs(4096)) is not None
+    assert _get_prefill_metadata(*_target_inputs(5120)) is not None
+    assert _get_prefill_metadata(*_target_inputs(4096)) is not None
 
 
 def test_cpu_seq_lens_mirror_avoids_query_start_loc_value_reads() -> None:
@@ -157,44 +152,44 @@ def test_cpu_seq_lens_mirror_avoids_query_start_loc_value_reads() -> None:
             raise AssertionError("CPU mirror path must not read device values")
 
     args[3] = UnreadableQueryStartLoc()
-    metadata = _get_batch_metadata(*args, seq_lens_cpu=[4, 4])
+    metadata = _get_prefill_metadata(*args, seq_lens_cpu=[4, 4])
     assert metadata == _BatchMetadata(2, 4, 8, False)
 
 
 def test_invalid_cpu_seq_lens_mirror_forces_fallback() -> None:
     args = _target_inputs()
-    assert _get_batch_metadata(*args, seq_lens_cpu=[3, 5]) is None
-    assert _get_batch_metadata(*args, seq_lens_cpu=[4]) is None
-    assert _get_batch_metadata(*args, seq_lens_cpu=[4, True]) is None
-    assert _get_batch_metadata(*args, seq_lens_cpu=None) is not None
+    assert _get_prefill_metadata(*args, seq_lens_cpu=[3, 5]) is None
+    assert _get_prefill_metadata(*args, seq_lens_cpu=[4]) is None
+    assert _get_prefill_metadata(*args, seq_lens_cpu=[4, True]) is None
+    assert _get_prefill_metadata(*args, seq_lens_cpu=None) is not None
 
 
-def test_shape_guards_reject_other_shape_and_single_sequence() -> None:
+def test_shared_guards_reject_other_shape_and_accept_single_sequence() -> None:
     args = list(_target_inputs())
     args[1] = torch.empty(5120, 3, dtype=torch.bfloat16)
-    assert _get_batch_metadata(*args) is None
+    assert _get_prefill_metadata(*args) is None
 
     args = list(_target_inputs())
     args[3] = torch.tensor([0, 8], dtype=torch.int32)
     args[4] = torch.tensor([0], dtype=torch.int64)
     args[5] = torch.tensor([False])
-    assert _get_batch_metadata(*args) is None
+    assert _get_prefill_metadata(*args) == _SingleSequenceMetadata(8, 0, False)
 
 
 def test_branch_guards_reject_unequal_or_mixed_state_batches() -> None:
     args = list(_target_inputs())
     args[3] = torch.tensor([0, 3, 8], dtype=torch.int32)
-    assert _get_batch_metadata(*args) is None
+    assert _get_prefill_metadata(*args) is None
 
     args = list(_target_inputs())
     args[5] = torch.tensor([False, True])
-    assert _get_batch_metadata(*args) is None
+    assert _get_prefill_metadata(*args) is None
 
 
 def test_pad_slot_guard_forces_fallback() -> None:
     args = list(_target_inputs())
     args[4] = torch.tensor([0, -1], dtype=torch.int64)
-    assert _get_batch_metadata(*args) is None
+    assert _get_prefill_metadata(*args) is None
 
 
 def test_non_target_wrapper_forwards_signature_and_kwargs() -> None:

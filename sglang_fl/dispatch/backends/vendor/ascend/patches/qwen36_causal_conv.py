@@ -12,13 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Batch equal-length Qwen3.6 causal-convolution prefill on Ascend.
+"""Single- and equal-length batched Qwen3.6 convolution prefill on Ascend.
 
 The current ``sgl-kernel-npu`` packed-input wrapper invokes the native
 convolution once per sequence and concatenates the outputs.  SGLang's normal
 chunked-prefill batches contain equal-length sequences (for example 16x1K or
 4x4K), so they can be reshaped into one dense batch and processed by the same
 native implementation in one call.
+
+A single sequence instead writes directly into its cache slot via
+``final_states_out``, avoiding the batched gather/scatter and wrapper list/cat.
+Both paths share one input validator, fallback and patch installation.
 
 This patch deliberately does not replace the convolution arithmetic.  It only
 removes per-sequence Python dispatch and intermediate outputs.  Unsupported
@@ -28,11 +32,13 @@ lengths retain the upstream implementation.
 
 from __future__ import annotations
 
+import functools
+import inspect
 import logging
 import sys
 from collections.abc import Sequence
 from numbers import Integral
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, NamedTuple, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -40,7 +46,14 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 _QWEN36_CONV_SHAPES = frozenset({(4096, 4), (5120, 4)})
-_PATCH_MARKER = "_sglang_fl_qwen36_equal_length_batched"
+_PATCH_MARKER = "_sglang_fl_qwen36_prefill"
+_BACKEND_MODULE = "sglang.srt.hardware_backend.npu.attention.ascend_gdn_backend"
+
+
+class _SingleSequenceMetadata(NamedTuple):
+    valid_tokens: int
+    cache_index: int
+    use_initial_state: bool
 
 
 class _BatchMetadata(NamedTuple):
@@ -50,7 +63,25 @@ class _BatchMetadata(NamedTuple):
     use_initial_state: bool
 
 
-def _get_batch_metadata(
+def _cpu_sequence_length_matches(
+    seq_lens_cpu: Optional[Sequence[int]], valid_tokens: int
+) -> bool:
+    if seq_lens_cpu is None:
+        return True
+    try:
+        if len(seq_lens_cpu) != 1:
+            return False
+        seq_len = seq_lens_cpu[0]
+    except (IndexError, TypeError, ValueError):
+        return False
+    return (
+        isinstance(seq_len, Integral)
+        and not isinstance(seq_len, bool)
+        and seq_len == valid_tokens
+    )
+
+
+def _get_prefill_metadata(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: Optional[torch.Tensor],
@@ -61,8 +92,10 @@ def _get_batch_metadata(
     activation: Optional[str],
     pad_slot_id: int,
     seq_lens_cpu: Optional[Sequence[int]] = None,
-) -> Optional[_BatchMetadata]:
-    """Return metadata only for the narrow, semantics-preserving fast path."""
+    *,
+    single_supported: bool = True,
+) -> Optional[Union[_SingleSequenceMetadata, _BatchMetadata]]:
+    """Validate shared tensor contracts once, then inspect branch metadata."""
     if (
         x.ndim != 2
         or weight.ndim != 2
@@ -106,11 +139,36 @@ def _get_batch_metadata(
 
     batch_size = query_start_loc.numel() - 1
     if (
-        batch_size <= 1
+        batch_size < 1
         or cache_indices.numel() != batch_size
         or has_initial_state.numel() != batch_size
     ):
         return None
+
+    if batch_size == 1:
+        if not single_supported:
+            return None
+        # Preserve the B=1 scalar checks and direct cache-slot writeback.
+        # The multi-sequence CPU-mirror path below must not inherit these
+        # query_start_loc reads: they would reintroduce per-layer NPU syncs.
+        try:
+            start = int(query_start_loc[0].item())
+            valid_tokens = int(query_start_loc[1].item())
+            cache_index = int(cache_indices[0].item())
+            use_initial_state = bool(has_initial_state[0].item())
+        except (RuntimeError, TypeError, ValueError):
+            return None
+        if (
+            start != 0
+            or valid_tokens <= 0
+            or valid_tokens > x.shape[-1]
+            or not _cpu_sequence_length_matches(seq_lens_cpu, valid_tokens)
+            or cache_index == pad_slot_id
+            or cache_index < 0
+            or cache_index >= conv_states.shape[0]
+        ):
+            return None
+        return _SingleSequenceMetadata(valid_tokens, cache_index, use_initial_state)
 
     if seq_lens_cpu is not None:
         # SGLang 0.5.11 passes ForwardBatch.extend_seq_lens_cpu alongside
@@ -170,6 +228,41 @@ def _get_batch_metadata(
     )
 
 
+def _run_single_sequence(
+    native_fn: Callable,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    conv_states: torch.Tensor,
+    activation: Optional[str],
+    metadata: _SingleSequenceMetadata,
+) -> torch.Tensor:
+    """Use native direct state writeback without batching gather/scatter."""
+    if x.stride(-1) != 1:
+        x = x.contiguous()
+    if bias is not None:
+        bias = bias.contiguous()
+
+    state = conv_states[metadata.cache_index].unsqueeze(0)
+    out, _ = native_fn(
+        x[..., : metadata.valid_tokens],
+        weight,
+        bias,
+        initial_states=state if metadata.use_initial_state else None,
+        return_final_states=True,
+        final_states_out=state,
+        activation=activation,
+    )
+    trailing_tokens = x.shape[-1] - metadata.valid_tokens
+    if trailing_tokens:
+        # Keep the original B=1 padding operators; this is structural cleanup,
+        # not a change to FlagGems dispatch or numerical execution.
+        out = torch.cat(
+            (out, out.new_zeros([*out.shape[:-1], trailing_tokens])), dim=-1
+        )
+    return out
+
+
 def _run_equal_length_batched(
     native_fn: Callable,
     x: torch.Tensor,
@@ -208,11 +301,7 @@ def _run_equal_length_batched(
     )
     conv_states.index_copy_(0, cache_indices, final_states)
 
-    packed_out = (
-        dense_out.transpose(0, 1)
-        .contiguous()
-        .view(dim, metadata.valid_tokens)
-    )
+    packed_out = dense_out.transpose(0, 1).contiguous().view(dim, metadata.valid_tokens)
     trailing_tokens = x.shape[-1] - metadata.valid_tokens
     if trailing_tokens:
         packed_out = F.pad(packed_out, (0, trailing_tokens))
@@ -223,6 +312,9 @@ def _make_optimized_causal_conv1d_fn(
     upstream_fn: Callable,
     native_fn: Callable,
 ) -> Callable:
+    single_supported = _native_api_supported(native_fn)
+
+    @functools.wraps(upstream_fn)
     def optimized_causal_conv1d_fn_npu(
         x: torch.Tensor,
         weight: torch.Tensor,
@@ -235,7 +327,7 @@ def _make_optimized_causal_conv1d_fn(
         pad_slot_id: int = -1,
         **kwargs,
     ) -> torch.Tensor:
-        metadata = _get_batch_metadata(
+        metadata = _get_prefill_metadata(
             x,
             weight,
             bias,
@@ -246,7 +338,12 @@ def _make_optimized_causal_conv1d_fn(
             activation,
             pad_slot_id,
             kwargs.get("seq_lens_cpu"),
+            single_supported=single_supported,
         )
+        if isinstance(metadata, _SingleSequenceMetadata):
+            return _run_single_sequence(
+                native_fn, x, weight, bias, conv_states, activation, metadata
+            )
         if metadata is not None:
             return _run_equal_length_batched(
                 native_fn,
@@ -275,27 +372,43 @@ def _make_optimized_causal_conv1d_fn(
     return optimized_causal_conv1d_fn_npu
 
 
-def patch_qwen36_causal_conv_prefill() -> None:
-    """Install the guarded batching adapter and preserve imported aliases."""
+def _native_api_supported(native_fn: Callable) -> bool:
+    """The B=1 path needs direct state writeback; batching does not."""
+    try:
+        parameters = inspect.signature(native_fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return all(
+        name in parameters
+        for name in (
+            "initial_states",
+            "return_final_states",
+            "final_states_out",
+            "activation",
+        )
+    )
+
+
+def patch_qwen36_causal_conv_prefill() -> bool:
+    """Install one guarded prefill adapter and preserve imported aliases."""
     from sgl_kernel_npu.mamba import causal_conv1d as causal_conv
 
     upstream_fn = causal_conv.causal_conv1d_fn_npu
-    if getattr(upstream_fn, _PATCH_MARKER, False):
-        return
-
-    optimized_fn = _make_optimized_causal_conv1d_fn(
-        upstream_fn,
-        causal_conv.causal_conv1d_fn_native,
-    )
-    causal_conv.causal_conv1d_fn_npu = optimized_fn
+    already_patched = getattr(upstream_fn, _PATCH_MARKER, False)
+    optimized_fn = upstream_fn
+    if not already_patched:
+        optimized_fn = _make_optimized_causal_conv1d_fn(
+            upstream_fn, causal_conv.causal_conv1d_fn_native
+        )
+        causal_conv.causal_conv1d_fn_npu = optimized_fn
 
     # SGLang imports the wrapper by value, so update it as well when the
     # attention backend was initialized before the plugin patch ran.
-    backend = sys.modules.get(
-        "sglang.srt.hardware_backend.npu.attention.ascend_gdn_backend"
-    )
+    backend = sys.modules.get(_BACKEND_MODULE)
     if backend is not None:
         backend.causal_conv1d_fn_npu = optimized_fn
         backend.causal_conv1d_fn = optimized_fn
 
-    logger.info("Ascend Qwen3.6 equal-length batched causal-conv path applied")
+    if not already_patched:
+        logger.info("Ascend Qwen3.6 single/batched causal-conv prefill paths applied")
+    return True
