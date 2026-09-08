@@ -87,8 +87,21 @@ AutoConfig.register("hy_v4", HYV4Config, exist_ok=True)
 _sglang_patches_applied = False
 
 
+def patch_npu_mla_pool_init(pool_class):
+    """Accept 0.5.11's unused NSA keyword once, at bootstrap or worker import."""
+    if getattr(pool_class, "_hy_accepts_kv_cache_dim", False):
+        return
+    original_init = pool_class.__init__
+
+    def init(self, *args, kv_cache_dim=None, **kwargs):
+        return original_init(self, *args, **kwargs)
+
+    pool_class.__init__ = init
+    pool_class._hy_accepts_kv_cache_dim = True
+
+
 def apply_sglang_patches():
-    """Install the two small 0.5.11 shims after plugin discovery completes.
+    """Install 0.5.11 compatibility shims after plugin discovery completes.
 
     Keeping SGLang imports out of module scope avoids recursively loading the
     ``sglang_fl`` entry point while it is still being initialized.
@@ -175,10 +188,5 @@ def apply_sglang_patches():
         derive_context_length_with_hyv4_graph_bound
     )
 
-    old_npu_mla_init = NPUMLATokenToKVPool.__init__
-
-    def hy4_npu_mla_init(self, *args, kv_cache_dim=None, **kwargs):
-        return old_npu_mla_init(self, *args, **kwargs)
-
-    NPUMLATokenToKVPool.__init__ = hy4_npu_mla_init
+    patch_npu_mla_pool_init(NPUMLATokenToKVPool)
     _sglang_patches_applied = True

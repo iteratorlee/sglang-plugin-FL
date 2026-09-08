@@ -432,7 +432,7 @@ def main():
         / "models"
         / "hy4_preview"
     )
-    parser.add_argument("--scatter-module", type=Path, default=source_dir / "hy4_triton_attn.py")
+    parser.add_argument("--scatter-module", type=Path, default=source_dir / "hy4_kv_cache.py")
     parser.add_argument(
         "--attention-module", type=Path, default=source_dir / "hy4_sparse_attention.py"
     )

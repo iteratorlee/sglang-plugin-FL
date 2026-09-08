@@ -11,11 +11,7 @@ import torch
 import torch_npu
 
 from sglang_fl.models.hy4_preview.hc import HYV4HCHeadLayer, HYV4HCLayer
-from sglang_fl.models.hy4_preview.hy4_triton_attn import (
-    hy4_kv_scatter,
-    hy4_mla_decode_sinks_triton,
-)
-from sglang_fl.models.hy4_preview.hy4_triton_projection import hy4_head_bmm
+from sglang_fl.models.hy4_preview.hy4_kv_cache import hy4_kv_scatter
 from sglang.srt.layers.rotary_embedding.factory import get_rope_wrapper
 from sglang.srt.server_args import (
     get_global_server_args,
@@ -23,342 +19,78 @@ from sglang.srt.server_args import (
 )
 
 
-def decode_chain(qn, qr, kn, kr, key_pool, rope_pool, loc, sinks, r2t, req, lens, wv, gate):
-    hy4_kv_scatter(key_pool, kn, loc, lens)
-    hy4_kv_scatter(rope_pool, kr, loc, lens)
-    attn = hy4_mla_decode_sinks_triton(
-        qn, qr, key_pool, rope_pool, sinks, r2t, req, lens,
-        1.0 / (576.0**0.5), 2, 512, 64,
-    )
-    return hy4_head_bmm(attn, wv, gate)
+def validate_kv_scatter() -> dict:
+    """Check graph writes against independent CPU pools, including padding.
 
-
-def decode_reference(qn, qr, key_pool, rope_pool, sinks, r2t, req, lens, wv, gate):
-    """Small FP32 definition of sink decode plus the gated V projection."""
-    rows = []
-    scale = 1.0 / (576.0**0.5)
-    for index in range(qn.shape[0]):
-        length = int(lens[index].item())
-        if length == 0:
-            rows.append(torch.zeros_like(qn[index]))
-            continue
-        token_ids = r2t[req[index].long(), :length].long()
-        key = key_pool[token_ids, 0].float()
-        rope = rope_pool[token_ids, 0].float()
-        score = (
-            qn[index].float() @ key.transpose(0, 1)
-            + qr[index].float() @ rope.transpose(0, 1)
-        ) * scale
-        score_with_sink = torch.cat((score, sinks[:, None].float()), dim=-1)
-        prob = torch.softmax(score_with_sink, dim=-1)[:, :length]
-        rows.append((prob @ key).to(torch.bfloat16))
-    attn = torch.stack(rows)
-    projected = torch.einsum("thk,hkn->thn", attn.float(), wv.float())
-    return (projected * gate.view_as(projected).float()).to(torch.bfloat16)
-
-
-def validate_decode_chain() -> dict:
+    Sink attention is covered by validate_indexer_scatter_chain_npu.py using
+    the production native-DSA path; no historical dense MLA kernel is needed.
+    """
     torch.manual_seed(20260904)
-    bs, pool_rows, max_ctx = 32, 256, 8
-    qn = torch.randn(bs, 2, 512, device="npu", dtype=torch.bfloat16) * 0.02
-    q_storage = (
-        torch.randn(bs, 2, 256, device="npu", dtype=torch.bfloat16) * 0.02
+    batch_size, pool_rows = 32, 512
+    # Real key/RoPE inputs are strided slices of a shared 576-channel buffer.
+    storage = torch.randn(
+        batch_size, 1, 576, device="npu", dtype=torch.bfloat16
     )
-    qr = q_storage[..., 192:]
-    kn = torch.randn(bs, 1, 512, device="npu", dtype=torch.bfloat16) * 0.02
-    kv_storage = (
-        torch.randn(bs, 1, 576, device="npu", dtype=torch.bfloat16) * 0.02
-    )
-    kr = kv_storage[..., 512:]
-    qn_base, qr_base = qn.clone(), qr.clone()
-    kn_base, kr_base = kn.clone(), kr.clone()
-    key_base = torch.randn(pool_rows, 1, 512, device="npu", dtype=torch.bfloat16) * 0.02
-    rope_base = torch.randn(pool_rows, 1, 64, device="npu", dtype=torch.bfloat16) * 0.02
-    key_pool, rope_pool = key_base.clone(), rope_base.clone()
-    loc = torch.zeros(bs, device="npu", dtype=torch.int32)
-    sinks = torch.randn(2, device="npu", dtype=torch.float32)
-    r2t = torch.zeros(bs, max_ctx, device="npu", dtype=torch.int32)
-    req = torch.arange(bs, device="npu", dtype=torch.int32)
-    lens = torch.zeros(bs, device="npu", dtype=torch.int32)
-    wv = torch.randn(2, 512, 256, device="npu", dtype=torch.bfloat16) * 0.02
-    gate = torch.sigmoid(
-        torch.randn(bs, 2 * 256, device="npu", dtype=torch.bfloat16)
-    )
-    gate_base = gate.clone()
+    chunks = (storage[..., :512], storage[..., 512:])
+    pools = [
+        torch.randn(pool_rows, 1, width, device="npu", dtype=torch.bfloat16)
+        for width in (512, 64)
+    ]
+    locations = torch.zeros(batch_size, device="npu", dtype=torch.int32)
+    lengths = torch.zeros_like(locations)
+    initial_pools = [pool.cpu().clone() for pool in pools]
 
     graph = torch_npu.npu.NPUGraph()
     with torch_npu.npu.graph(graph):
-        graph_out = decode_chain(
-            qn, qr, kn, kr, key_pool, rope_pool, loc, sinks, r2t, req, lens, wv, gate
-        )
-
-    scenarios = []
-    multi_loc = torch.arange(96, 96 + bs, device="npu", dtype=torch.int32)
-    multi_lens_cpu = torch.tensor(
-        [(index % 4) + 1 for index in range(bs)], dtype=torch.int32
+        for pool, data in zip(pools, chunks):
+            hy4_kv_scatter(pool, data, locations, lengths)
+    graph.replay()
+    torch_npu.npu.synchronize()
+    padding_only_exact = all(
+        torch.equal(pool.cpu(), initial)
+        for pool, initial in zip(pools, initial_pools)
     )
-    multi_r2t_cpu = torch.stack(
-        [torch.arange(index * max_ctx, (index + 1) * max_ctx, dtype=torch.int32) for index in range(bs)]
-    )
-    # The newest valid token of every request must resolve to the location
-    # written by the captured KV scatter.  Earlier positions stay in distinct
-    # pre-populated base rows.
-    for index in range(bs):
-        multi_r2t_cpu[index, int(multi_lens_cpu[index]) - 1] = 96 + index
-    raw1_loc = torch.tensor(
-        [96] + [0] * (bs - 1), device="npu", dtype=torch.int32
-    )
-    raw1_r2t = torch.zeros((bs, max_ctx), device="npu", dtype=torch.int32)
-    raw1_r2t[0, 0] = 96
-    for name, new_loc, new_lens, new_r2t in (
-        (
-            "raw1_with_padding",
-            raw1_loc,
-            torch.tensor([1] + [0] * (bs - 1), device="npu", dtype=torch.int32),
-            raw1_r2t,
-        ),
-        (
-            "multi_request_changed_loc",
-            multi_loc,
-            multi_lens_cpu.to("npu"),
-            multi_r2t_cpu.to("npu"),
-        ),
-    ):
-        scale = 0.5 if name.startswith("raw1") else 0.75
-        replay_qn = qn_base * scale
-        replay_qr = qr_base * (scale + 0.1)
-        replay_kn = kn_base * (scale + 0.2)
-        replay_kr = kr_base * (scale + 0.3)
-        replay_gate = torch.sigmoid(gate.float() * 0.25).to(torch.bfloat16)
-        key_pool.copy_(key_base)
-        rope_pool.copy_(rope_base)
-        qn.copy_(replay_qn)
-        qr.copy_(replay_qr)
-        kn.copy_(replay_kn)
-        kr.copy_(replay_kr)
-        gate.copy_(replay_gate)
-        loc.copy_(new_loc)
-        lens.copy_(new_lens)
-        r2t.copy_(new_r2t)
-        graph.replay()
-        torch_npu.npu.synchronize()
-        replay = graph_out.clone()
-        active = new_lens > 0
-        active_loc = new_loc[active]
-        key_scatter_error = (
-            key_pool[active_loc.long(), 0].float() - kn[active, 0].float()
-        ).abs().max().item()
-        rope_scatter_error = (
-            rope_pool[active_loc.long(), 0].float() - kr[active, 0].float()
-        ).abs().max().item()
-        padding_slot_error = (
-            key_pool[0].float() - key_base[0].float()
-        ).abs().max().item()
-        rope_padding_slot_error = (
-            rope_pool[0].float() - rope_base[0].float()
-        ).abs().max().item()
-        reference = decode_reference(
-            qn, qr, key_pool, rope_pool, sinks, new_r2t, req, new_lens, wv, replay_gate
-        )
-        reference_error = (
-            replay.float() - reference.float()
-        ).abs().max().item()
 
-        eager = decode_chain(
-            qn,
-            qr,
-            kn,
-            kr,
-            key_base.clone(),
-            rope_base.clone(),
-            new_loc,
-            sinks,
-            new_r2t,
-            req,
-            new_lens,
-            wv,
-            replay_gate,
-        )
-        torch_npu.npu.synchronize()
-        error = (replay.float() - eager.float()).abs().max().item()
-        scenarios.append(
+    cases = []
+    for active_rows in (1, 2, batch_size):
+        # Never use an eager NPU scatter to prepare the reference pool: it
+        # could hide stale captured indices. Preserve every previously written
+        # row across eight launches and compare the entire cache each time.
+        expected = [pool.cpu().clone() for pool in pools]
+        steps = []
+        for step in range(8):
+            updated = torch.randn(batch_size, 1, 576, dtype=torch.bfloat16)
+            new_locations = torch.zeros(batch_size, dtype=torch.int32)
+            slots = 1 + step * batch_size + torch.arange(active_rows)
+            new_locations[:active_rows] = slots.to(torch.int32)
+            new_lengths = torch.zeros(batch_size, dtype=torch.int32)
+            new_lengths[:active_rows] = step + 1
+            storage.copy_(updated)
+            locations.copy_(new_locations)
+            lengths.copy_(new_lengths)
+            for reference, data in zip(
+                expected, (updated[..., :512], updated[..., 512:])
+            ):
+                reference[slots] = data[:active_rows]
+            graph.replay()
+            torch_npu.npu.synchronize()
+            exact = [
+                torch.equal(pool.cpu(), reference)
+                for pool, reference in zip(pools, expected)
+            ]
+            steps.append({"step": step + 1, "pools_exact": exact, "passed": all(exact)})
+        cases.append(
             {
-                "name": name,
-                "max_abs_error": error,
-                "fp32_reference_max_abs_error": reference_error,
-                "key_scatter_max_abs_error": key_scatter_error,
-                "rope_scatter_max_abs_error": rope_scatter_error,
-                "padding_slot0_max_abs_error": padding_slot_error,
-                "rope_padding_slot0_max_abs_error": rope_padding_slot_error,
-                "passed": (
-                    error <= 0.01
-                    and reference_error <= 0.125
-                    and key_scatter_error == 0.0
-                    and rope_scatter_error == 0.0
-                    and padding_slot_error == 0.0
-                    and rope_padding_slot_error == 0.0
-                ),
-            }
-        )
-    # Real decode accumulates one new KV row per replay.  Preserve the pool
-    # across three graph launches, change loc/seq_len/query/KV each step, and
-    # compare every output against the FP32 definition using the full history.
-    key_pool.copy_(key_base)
-    rope_pool.copy_(rope_base)
-    loc.zero_()
-    lens.zero_()
-    r2t.zero_()
-    cumulative = []
-    saved_key_rows = []
-    saved_rope_rows = []
-    for step in range(3):
-        factor = 0.6 + step * 0.1
-        qn.copy_(qn_base * factor)
-        qr.copy_(qr_base * (factor + 0.05))
-        kn.copy_(kn_base * (factor + 0.1))
-        kr.copy_(kr_base * (factor + 0.15))
-        gate.copy_(torch.sigmoid(gate_base.float() * factor).to(torch.bfloat16))
-        loc.zero_()
-        loc[0] = 160 + step
-        lens.zero_()
-        lens[0] = step + 1
-        r2t[0, step] = 160 + step
-        graph.replay()
-        torch_npu.npu.synchronize()
-        replay = graph_out.clone()
-        saved_key_rows.append(kn[0, 0].clone())
-        saved_rope_rows.append(kr[0, 0].clone())
-        reference = decode_reference(
-            qn, qr, key_pool, rope_pool, sinks, r2t, req, lens, wv, gate
-        )
-        reference_error = (
-            replay.float() - reference.float()
-        ).abs().max().item()
-        key_history_error = max(
-            (
-                key_pool[160 + index, 0].float() - expected.float()
-            ).abs().max().item()
-            for index, expected in enumerate(saved_key_rows)
-        )
-        rope_history_error = max(
-            (
-                rope_pool[160 + index, 0].float() - expected.float()
-            ).abs().max().item()
-            for index, expected in enumerate(saved_rope_rows)
-        )
-        slot0_error = (
-            key_pool[0].float() - key_base[0].float()
-        ).abs().max().item()
-        cumulative.append(
-            {
-                "step": step + 1,
-                "seq_len": step + 1,
-                "loc": 160 + step,
-                "fp32_reference_max_abs_error": reference_error,
-                "key_history_max_abs_error": key_history_error,
-                "rope_history_max_abs_error": rope_history_error,
-                "padding_slot0_max_abs_error": slot0_error,
-                "passed": reference_error <= 0.125
-                and key_history_error == 0.0
-                and rope_history_error == 0.0
-                and slot0_error == 0.0,
-            }
-        )
-
-    # Model-level packed BS2 first diverged only after six equal decode tokens.
-    # Reproduce the exact state shape here: two active, identical requests plus
-    # 30 graph-padding lanes, eight successive dynamic loc/seq_len replays, and
-    # disjoint request-to-token rows.  Each active lane must match both the
-    # FP32 definition and its duplicate peer at every step.
-    key_pool.copy_(key_base)
-    rope_pool.copy_(rope_base)
-    loc.zero_()
-    lens.zero_()
-    r2t.zero_()
-    cumulative_bs2 = []
-    for step in range(8):
-        factor = 0.55 + step * 0.05
-        qn_step = qn_base[0] * factor
-        qr_step = qr_base[0] * (factor + 0.03)
-        kn_step = kn_base[0] * (factor + 0.07)
-        kr_step = kr_base[0] * (factor + 0.11)
-        gate_step = torch.sigmoid(
-            gate_base[0].float() * factor
-        ).to(torch.bfloat16)
-        qn.zero_()
-        qr.zero_()
-        kn.zero_()
-        kr.zero_()
-        gate.zero_()
-        qn[:2].copy_(qn_step.unsqueeze(0).expand(2, -1, -1))
-        qr[:2].copy_(qr_step.unsqueeze(0).expand(2, -1, -1))
-        kn[:2].copy_(kn_step.unsqueeze(0).expand(2, -1, -1))
-        kr[:2].copy_(kr_step.unsqueeze(0).expand(2, -1, -1))
-        gate[:2].copy_(gate_step.unsqueeze(0).expand(2, -1))
-        loc.zero_()
-        loc[0] = 160 + step
-        loc[1] = 192 + step
-        lens.zero_()
-        lens[:2] = step + 1
-        r2t[0, step] = 160 + step
-        r2t[1, step] = 192 + step
-        graph.replay()
-        torch_npu.npu.synchronize()
-        replay = graph_out.clone()
-        reference = decode_reference(
-            qn, qr, key_pool, rope_pool, sinks, r2t, req, lens, wv, gate
-        )
-        reference_error = (
-            replay[:2].float() - reference[:2].float()
-        ).abs().max().item()
-        duplicate_error = (
-            replay[0].float() - replay[1].float()
-        ).abs().max().item()
-        key_history_error = max(
-            (
-                key_pool[160 + index, 0].float()
-                - key_pool[192 + index, 0].float()
-            ).abs().max().item()
-            for index in range(step + 1)
-        )
-        rope_history_error = max(
-            (
-                rope_pool[160 + index, 0].float()
-                - rope_pool[192 + index, 0].float()
-            ).abs().max().item()
-            for index in range(step + 1)
-        )
-        slot0_error = (
-            key_pool[0].float() - key_base[0].float()
-        ).abs().max().item()
-        cumulative_bs2.append(
-            {
-                "step": step + 1,
-                "seq_len": step + 1,
-                "locs": [160 + step, 192 + step],
-                "fp32_reference_max_abs_error": reference_error,
-                "duplicate_lane_max_abs_error": duplicate_error,
-                "key_duplicate_history_max_abs_error": key_history_error,
-                "rope_duplicate_history_max_abs_error": rope_history_error,
-                "padding_slot0_max_abs_error": slot0_error,
-                "passed": reference_error <= 0.125
-                and duplicate_error == 0.0
-                and key_history_error == 0.0
-                and rope_history_error == 0.0
-                and slot0_error == 0.0,
+                "active_rows": active_rows,
+                "steps": steps,
+                "passed": all(row["passed"] for row in steps),
             }
         )
     return {
-        "passed": all(row["passed"] for row in scenarios)
-        and all(row["passed"] for row in cumulative)
-        and all(row["passed"] for row in cumulative_bs2),
-        "q_rope_stride": list(qr.stride()),
-        "q_rope_contiguous": qr.is_contiguous(),
-        "k_rope_stride": list(kr.stride()),
-        "k_rope_contiguous": kr.is_contiguous(),
-        "cases": scenarios,
-        "cumulative_decode_replays": cumulative,
-        "cumulative_bs2_decode_replays": cumulative_bs2,
+        "input_strides": [list(data.stride()) for data in chunks],
+        "padding_only_exact": padding_only_exact,
+        "cases": cases,
+        "passed": padding_only_exact and all(row["passed"] for row in cases),
     }
 
 
@@ -502,17 +234,19 @@ def validate_native_rope() -> dict:
         "steps": steps,
         "passed": all(row["passed"] for row in steps),
     }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output")
     args = parser.parse_args()
     result = {
-        "decode_chain": validate_decode_chain(),
+        "kv_scatter": validate_kv_scatter(),
         "ihc": validate_ihc(),
         "native_rope": validate_native_rope(),
     }
     result["passed"] = (
-        result["decode_chain"]["passed"]
+        result["kv_scatter"]["passed"]
         and result["ihc"]["passed"]
         and result["native_rope"]["passed"]
     )

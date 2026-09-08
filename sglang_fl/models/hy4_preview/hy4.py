@@ -25,8 +25,9 @@ from sglang.srt.models.deepseek_common.attention_forward_methods.forward_methods
 )
 from sglang.srt.utils import set_weight_attrs
 
+from .bootstrap import patch_npu_mla_pool_init
 from .hc import HYV4HCHeadLayer, HYV4HCLayer
-from .hy4_triton_attn import hy4_kv_scatter
+from .hy4_kv_cache import hy4_kv_scatter
 from .hy4_triton_projection import (
     hy4_clamped_swiglu,
     hy4_head_bmm,
@@ -364,14 +365,7 @@ from sglang.srt.hardware_backend.npu.memory_pool_npu import (  # noqa: E402
     NPUMLATokenToKVPool,
 )
 
-if not getattr(NPUMLATokenToKVPool, "_hy_accepts_kv_cache_dim", False):
-    _original_npu_mla_init = NPUMLATokenToKVPool.__init__
-
-    def _hy_npu_mla_init(self, *args, kv_cache_dim=None, **kwargs):
-        return _original_npu_mla_init(self, *args, **kwargs)
-
-    NPUMLATokenToKVPool.__init__ = _hy_npu_mla_init
-    NPUMLATokenToKVPool._hy_accepts_kv_cache_dim = True
+patch_npu_mla_pool_init(NPUMLATokenToKVPool)
 
 if not hasattr(NPUMLATokenToKVPool, "_hy4_original_set_index_k_buffer"):
     NPUMLATokenToKVPool._hy4_original_set_index_k_buffer = (
