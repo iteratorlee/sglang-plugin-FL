@@ -13,6 +13,8 @@ Huawei NPU:
 import logging
 
 from .patches.attention_registry import patch_attn_backend_wrapper
+from .patches.fia_tnd_gqa import patch_fia_tnd_gqa
+from .patches.prefill_tuning import patch_prefill_tuning
 from .patches.qwen36_causal_conv import patch_qwen36_causal_conv_prefill
 from .patches.qwen36_causal_conv_decode_fused import (
     patch_qwen36_causal_conv_decode_fused,
@@ -42,6 +44,8 @@ def apply_ascend_patches() -> None:
     patch_qwen36_causal_conv_prefill()
     patch_qwen36_causal_conv_decode_fused()
     patch_vocab_parallel_embedding()
+    patch_fia_tnd_gqa()
+    patch_prefill_tuning()
 
 
 apply_ascend_patches()
