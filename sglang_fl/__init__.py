@@ -60,6 +60,15 @@ import logging
 import multiprocessing
 import os
 
+os.environ.setdefault(
+    "SGLANG_EXTERNAL_MODEL_PACKAGE", "sglang_fl.models.hy4_preview"
+)
+
+# The platform entry point imports this module before ModelConfig parses the
+# checkpoint.  Register HYV4 and its 0.5.11 compatibility shims at that point,
+# keeping all adaptation out of the SGLang source tree.
+from sglang_fl.models.hy4_preview import bootstrap as _hy4_preview_bootstrap  # noqa: F401,E402
+
 import torch
 
 logger = logging.getLogger(__name__)
@@ -149,12 +158,27 @@ def _build_config() -> dict:
 
     oot_whitelist = _parse_list(os.environ.get("SGLANG_FL_OOT_WHITELIST", ""))
 
-    # flagos_blacklist: SGLANG_FL_FLAGOS_BLACKLIST > yaml.flagos_blacklist > []
+    # FlagGems allow/deny lists: an environment list overrides both YAML lists.
+    flagos_wl_str = os.environ.get("SGLANG_FL_FLAGOS_WHITELIST", "").strip()
     flagos_bl_str = os.environ.get("SGLANG_FL_FLAGOS_BLACKLIST", "").strip()
-    if flagos_bl_str:
+    if flagos_wl_str and flagos_bl_str:
+        raise ValueError(
+            "Cannot set both SGLANG_FL_FLAGOS_WHITELIST and "
+            "SGLANG_FL_FLAGOS_BLACKLIST. Use one or the other."
+        )
+    if flagos_wl_str:
+        flagos_whitelist = _parse_list(flagos_wl_str)
+        flagos_blacklist = []
+    elif flagos_bl_str:
+        flagos_whitelist = []
         flagos_blacklist = _parse_list(flagos_bl_str)
     else:
+        flagos_whitelist = yaml_cfg.get("flagos_whitelist", []) or []
         flagos_blacklist = yaml_cfg.get("flagos_blacklist", []) or []
+        if flagos_whitelist and flagos_blacklist:
+            raise ValueError(
+                "Cannot configure both flagos_whitelist and flagos_blacklist."
+            )
 
     # strict: SGLANG_FL_STRICT > yaml.strict > False (default: fallback enabled)
     strict_str = os.environ.get("SGLANG_FL_STRICT", "").strip()
@@ -194,6 +218,7 @@ def _build_config() -> dict:
         "allow_vendors": allow_vendors,
         "oot_blacklist": oot_blacklist,
         "oot_whitelist": oot_whitelist,
+        "flagos_whitelist": flagos_whitelist,
         "flagos_blacklist": flagos_blacklist,
         "dispatch_log": dispatch_log,
         "flaggems_record": flaggems_record,
@@ -373,10 +398,12 @@ def _setup_flaggems(config: dict = None):
     if config is not None:
         record = config.get("flaggems_record", False)
         log_path = config.get("flaggems_log_path", "")
+        whitelist = config.get("flagos_whitelist", [])
         blacklist = config.get("flagos_blacklist", [])
     else:
         record = _parse_bool(os.environ.get("SGLANG_FLAGGEMS_RECORD", "0"))
         log_path = os.environ.get("SGLANG_FLAGGEMS_LOG_PATH", "").strip()
+        whitelist = []
         blacklist = []
 
     whitelist_str = os.environ.get("SGLANG_FL_FLAGOS_WHITELIST", "").strip()
@@ -388,9 +415,17 @@ def _setup_flaggems(config: dict = None):
             "Use one or the other."
         )
 
-    whitelist = _parse_list(whitelist_str)
-    if blacklist_str:
+    if whitelist_str:
+        whitelist = _parse_list(whitelist_str)
+        blacklist = []
+    elif blacklist_str:
+        whitelist = []
         blacklist = _parse_list(blacklist_str)
+
+    if whitelist and blacklist:
+        raise ValueError(
+            "Cannot configure both flagos_whitelist and flagos_blacklist."
+        )
 
     fg_kwargs = dict(
         record=record,
@@ -750,6 +785,11 @@ def load_plugin():
     _plugin_loaded = True
     if _is_rank0():
         logger.info("sglang_fl plugin loading")
+
+    # General-plugin discovery runs after entry-point modules have finished
+    # loading, so SGLang internals can be monkey-patched here without creating
+    # a platform-discovery import cycle.
+    _hy4_preview_bootstrap.apply_sglang_patches()
 
     # Suppress info logs on non-rank-0 processes to avoid duplicate output
     if not _is_rank0():

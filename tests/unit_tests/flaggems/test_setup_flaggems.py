@@ -236,6 +236,31 @@ def test_yaml_flagos_blacklist_is_default_when_env_blacklist_absent(
     ]
 
 
+def test_yaml_flagos_whitelist_is_default_when_env_lists_absent(
+    sglang_fl_module,
+    fake_flag_gems,
+) -> None:
+    sglang_fl_module._setup_flaggems(
+        {
+            "flaggems_record": False,
+            "flaggems_log_path": "",
+            "flagos_whitelist": ["ones"],
+            "flagos_blacklist": [],
+        }
+    )
+
+    assert fake_flag_gems.calls == [
+        (
+            "only_enable",
+            {
+                "include": ["ones"],
+                "record": False,
+                "once": True,
+            },
+        ),
+    ]
+
+
 def test_env_blacklist_overrides_yaml_flagos_blacklist(
     monkeypatch,
     sglang_fl_module,
@@ -248,6 +273,34 @@ def test_env_blacklist_overrides_yaml_flagos_blacklist(
             "flaggems_record": False,
             "flaggems_log_path": "",
             "flagos_blacklist": ["count_nonzero"],
+        }
+    )
+
+    assert fake_flag_gems.calls == [
+        (
+            "enable",
+            {
+                "unused": ["silu"],
+                "record": False,
+                "once": True,
+            },
+        ),
+    ]
+
+
+def test_env_blacklist_overrides_yaml_flagos_whitelist(
+    monkeypatch,
+    sglang_fl_module,
+    fake_flag_gems,
+) -> None:
+    monkeypatch.setenv("SGLANG_FL_FLAGOS_BLACKLIST", "silu")
+
+    sglang_fl_module._setup_flaggems(
+        {
+            "flaggems_record": False,
+            "flaggems_log_path": "",
+            "flagos_whitelist": ["ones"],
+            "flagos_blacklist": [],
         }
     )
 
@@ -296,6 +349,24 @@ def test_build_config_uses_yaml_flagos_blacklist_when_env_absent(
     assert config["flagos_blacklist"] == ["yaml_op"]
 
 
+def test_build_config_uses_yaml_flagos_whitelist_when_env_absent(
+    monkeypatch,
+    sglang_fl_module,
+) -> None:
+    import sglang_fl.dispatch.config as config_module
+
+    monkeypatch.setattr(
+        config_module,
+        "get_effective_config",
+        lambda: {"flagos_whitelist": ["ones"]},
+    )
+
+    config = sglang_fl_module._build_config()
+
+    assert config["flagos_whitelist"] == ["ones"]
+    assert config["flagos_blacklist"] == []
+
+
 def test_build_config_env_flagos_blacklist_overrides_yaml(
     monkeypatch,
     sglang_fl_module,
@@ -312,3 +383,4 @@ def test_build_config_env_flagos_blacklist_overrides_yaml(
     config = sglang_fl_module._build_config()
 
     assert config["flagos_blacklist"] == ["env_op", "other_op"]
+    assert config["flagos_whitelist"] == []
