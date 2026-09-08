@@ -149,6 +149,15 @@ def _build_config() -> dict:
 
     oot_whitelist = _parse_list(os.environ.get("SGLANG_FL_OOT_WHITELIST", ""))
 
+    # FlagGems Layer-1 allow/deny policy.  An allowlist is intentionally
+    # supported in YAML as well as the environment: conservative vendor
+    # profiles can remain safe when FlagGems adds new, unvalidated kernels.
+    flagos_wl_str = os.environ.get("SGLANG_FL_FLAGOS_WHITELIST", "").strip()
+    if flagos_wl_str:
+        flagos_whitelist = _parse_list(flagos_wl_str)
+    else:
+        flagos_whitelist = yaml_cfg.get("flagos_whitelist", []) or []
+
     # flagos_blacklist: SGLANG_FL_FLAGOS_BLACKLIST > yaml.flagos_blacklist > []
     flagos_bl_str = os.environ.get("SGLANG_FL_FLAGOS_BLACKLIST", "").strip()
     if flagos_bl_str:
@@ -194,6 +203,7 @@ def _build_config() -> dict:
         "allow_vendors": allow_vendors,
         "oot_blacklist": oot_blacklist,
         "oot_whitelist": oot_whitelist,
+        "flagos_whitelist": flagos_whitelist,
         "flagos_blacklist": flagos_blacklist,
         "dispatch_log": dispatch_log,
         "flaggems_record": flaggems_record,
@@ -374,10 +384,12 @@ def _setup_flaggems(config: dict = None):
         record = config.get("flaggems_record", False)
         log_path = config.get("flaggems_log_path", "")
         blacklist = config.get("flagos_blacklist", [])
+        configured_whitelist = config.get("flagos_whitelist", [])
     else:
         record = _parse_bool(os.environ.get("SGLANG_FLAGGEMS_RECORD", "0"))
         log_path = os.environ.get("SGLANG_FLAGGEMS_LOG_PATH", "").strip()
         blacklist = []
+        configured_whitelist = []
 
     whitelist_str = os.environ.get("SGLANG_FL_FLAGOS_WHITELIST", "").strip()
     blacklist_str = os.environ.get("SGLANG_FL_FLAGOS_BLACKLIST", "").strip()
@@ -388,9 +400,12 @@ def _setup_flaggems(config: dict = None):
             "Use one or the other."
         )
 
-    whitelist = _parse_list(whitelist_str)
+    whitelist = _parse_list(whitelist_str) or list(configured_whitelist)
     if blacklist_str:
         blacklist = _parse_list(blacklist_str)
+        # An explicit environment denylist overrides the conservative YAML
+        # allowlist, matching the documented env > YAML precedence.
+        whitelist = []
 
     fg_kwargs = dict(
         record=record,
@@ -712,6 +727,16 @@ def activate_platform() -> str | None:
     """
     from sglang_fl.utils import get_device_info
 
+    try:
+        # AutoConfig and ModelRegistry are consulted before the general plugin
+        # hook during server startup, so out-of-tree models register here.
+        from sglang_fl.models.register import register_glm5_next
+
+        register_glm5_next()
+    except Exception as e:
+        logger.warning("sglang_fl model registration failed: %s", e)
+        return None
+
     info = get_device_info()
     if info is None:
         logger.warning("sglang_fl platform activation failed: DeviceDetector unavailable")
@@ -734,6 +759,7 @@ def is_plugin_loaded() -> bool:
     """Return whether SGLang invoked the general plugin entry point."""
     return _plugin_loaded
 
+
 def is_plugin_active() -> bool:
     """Return whether the general plugin completed its initialization."""
     return _plugin_active
@@ -750,6 +776,10 @@ def load_plugin():
     _plugin_loaded = True
     if _is_rank0():
         logger.info("sglang_fl plugin loading")
+
+    from sglang_fl.models.register import apply_glm5_patches
+
+    apply_glm5_patches()
 
     # Suppress info logs on non-rank-0 processes to avoid duplicate output
     if not _is_rank0():

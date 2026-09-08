@@ -31,9 +31,9 @@ def patch_attn_backend_wrapper() -> None:
         Wrapper for special models like hybrid GDN, so we don't
         need to change the code of the original attention backend.
         """
-        assert not (
-            runner.hybrid_gdn_config is not None and runner.use_mla_backend
-        ), "hybrid_gdn can only be used with non-MLA models."
+        assert not (runner.hybrid_gdn_config is not None and runner.use_mla_backend), (
+            "hybrid_gdn can only be used with non-MLA models."
+        )
 
         if cfg := runner.mambaish_config:
             from sglang.srt.configs.linear_attn_model_registry import (
@@ -61,35 +61,57 @@ def patch_attn_backend_wrapper() -> None:
                     LightningAttentionBackend,
                 )
             else:
-                from sglang.srt.hardware_backend.npu.attention.ascend_gdn_backend import (
-                    AscendGDNAttnBackend as GDNAttnBackend,
-                )
-                from sglang.srt.hardware_backend.npu.attention.ascend_hybrid_linear_attn_backend import (
-                    AscendHybridLinearAttnBackend as HybridLinearAttnBackend,
-                )
-                from sglang.srt.hardware_backend.npu.attention.ascend_hybrid_linear_attn_backend import (
-                    AscendMamba2AttnBackend as Mamba2AttnBackend,
+                # The v0.5.11 image can lack optional speculative-Mamba
+                # symbols imported by AscendHybridLinearAttnBackend.  A
+                # registered KDA model needs neither GDN nor speculative-MTP,
+                # so start with the dependency-free generic dispatcher.  The
+                # GDN/Mamba2 branches below replace it lazily with the Ascend
+                # implementation when those models actually need it.
+                from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
+                    HybridLinearAttnBackend,
                 )
 
             check_environments()
             initialize_linear_attn_config(runner.server_args)
             if runner.hybrid_gdn_config is not None:
+                if is_npu():
+                    # Do not import this eagerly for an unrelated registered
+                    # KDA model.  Some v0.5.11 images ship an older
+                    # sgl_kernel_npu without GDN-only symbols such as
+                    # fused_gdn_gating_kernel_without_sigmoid.
+                    from sglang.srt.hardware_backend.npu.attention.ascend_gdn_backend import (
+                        AscendGDNAttnBackend as GDNAttnBackend,
+                    )
+                    from sglang.srt.hardware_backend.npu.attention.ascend_hybrid_linear_attn_backend import (
+                        AscendHybridLinearAttnBackend as HybridLinearAttnBackend,
+                    )
+
                 if is_blackwell():
                     assert (
                         runner.server_args.attention_backend == "triton"
                         or runner.server_args.attention_backend == "trtllm_mha"
                         or runner.server_args.attention_backend == "fa4"
                         or runner.server_args.attention_backend == "flashinfer"
-                    ), "triton, trtllm_mha, fa4, or flashinfer backend are the only supported backends on Blackwell GPUs for hybrid GDN models, use --attention-backend to specify the backend."
+                    ), (
+                        "triton, trtllm_mha, fa4, or flashinfer backend are the only supported backends on Blackwell GPUs for hybrid GDN models, use --attention-backend to specify the backend."
+                    )
                 if is_npu():
-                    assert (
-                        runner.server_args.attention_backend == "ascend"
-                    ), "ascend backend is the only supported backend on NPU for hybrid GDN models, use --attention-backend ascend to specify the backend."
+                    assert runner.server_args.attention_backend == "ascend", (
+                        "ascend backend is the only supported backend on NPU for hybrid GDN models, use --attention-backend ascend to specify the backend."
+                    )
                 logger.info(
                     "Using hybrid linear attention backend for hybrid GDN models."
                 )
                 linear_attn_backend = GDNAttnBackend(runner)
             elif runner.mamba2_config is not None:
+                if is_npu():
+                    from sglang.srt.hardware_backend.npu.attention.ascend_hybrid_linear_attn_backend import (
+                        AscendMamba2AttnBackend as Mamba2AttnBackend,
+                    )
+                    from sglang.srt.hardware_backend.npu.attention.ascend_hybrid_linear_attn_backend import (
+                        AscendHybridLinearAttnBackend as HybridLinearAttnBackend,
+                    )
+
                 linear_attn_backend = Mamba2AttnBackend(runner)
             elif runner.kimi_linear_config is not None:
                 linear_attn_backend = KDAAttnBackend(runner)

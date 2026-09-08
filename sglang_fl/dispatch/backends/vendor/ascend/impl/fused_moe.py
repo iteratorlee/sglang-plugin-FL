@@ -72,6 +72,16 @@ def fused_moe_ascend(
 
         hidden_states = swiglu_oai(layer, hidden_states)
     elif obj.moe_runner_config.activation == "silu":
+        limit = getattr(layer, "_sglang_fl_swiglu_limit", None)
+        if limit is not None:
+            gate, up = torch.chunk(hidden_states, 2, dim=-1)
+            hidden_states = torch.cat(
+                [
+                    torch.clamp(gate, max=limit),
+                    torch.clamp(up, min=-limit, max=limit),
+                ],
+                dim=-1,
+            )
         hidden_states = torch.ops.npu.npu_swiglu(hidden_states)
     else:
         from sglang.srt.layers.activation import GeluAndMul
