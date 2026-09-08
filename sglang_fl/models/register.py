@@ -12,7 +12,6 @@ from .glm5_next_config import Glm5NextConfig, Glm5NextTextConfig
 logger = logging.getLogger(__name__)
 _REGISTERED = False
 _LINEAR_ATTN_REGISTERED = False
-_ACTIVE_GLM_CONFIG = ContextVar("sglang_fl_active_glm_config", default=None)
 _GLM_POOL_INDEX_HEAD_DIM = ContextVar("sglang_fl_glm_pool_index_head_dim", default=None)
 
 
@@ -121,36 +120,6 @@ def patch_deepseek_dsa_compat() -> None:
     dsv2.get_nsa_index_n_heads = lambda config: config.index_n_heads
     dsv2.get_nsa_index_topk = lambda config: config.index_topk
 
-    # v0.5.11 constructs the legacy NSA Indexer without passing the model
-    # config.  GLM-5.3 needs the later KPool=4 semantics and two extra
-    # checkpoint parameters, so route just the duration of this model's
-    # attention constructor through the plugin implementation.  ContextVar
-    # keeps nested or concurrent model construction isolated.
-    if not hasattr(patch_deepseek_dsa_compat, "_original_indexer"):
-        patch_deepseek_dsa_compat._original_indexer = dsv2.Indexer
-        patch_deepseek_dsa_compat._original_attn_init = (
-            dsv2.DeepseekV2AttentionMLA.__init__
-        )
-
-        def _indexer_factory(*args, **kwargs):
-            config = _ACTIVE_GLM_CONFIG.get()
-            if _is_sparse(config) and int(getattr(config, "index_kpool", 1)) > 1:
-                from .kpool_indexer import IndexerKPool
-
-                return IndexerKPool(*args, **kwargs, config=config)
-            return patch_deepseek_dsa_compat._original_indexer(*args, **kwargs)
-
-        def _attention_init(self, config, *args, **kwargs):
-            token = _ACTIVE_GLM_CONFIG.set(config)
-            try:
-                return patch_deepseek_dsa_compat._original_attn_init(
-                    self, config, *args, **kwargs
-                )
-            finally:
-                _ACTIVE_GLM_CONFIG.reset(token)
-
-        dsv2.Indexer = _indexer_factory
-        dsv2.DeepseekV2AttentionMLA.__init__ = _attention_init
 
     # A few v0.5.11 modules bind the helper at import time.  Update only that
     # bound symbol; the wrapper delegates all non-GLM configs to the original.

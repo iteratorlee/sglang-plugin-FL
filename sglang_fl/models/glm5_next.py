@@ -1070,10 +1070,7 @@ class Glm5NextDecoderLayer(nn.Module):
             mlp_reduce_scatter=use_reduce_scatter,
         ):
             with _mlp_ctx:
-                if isinstance(self.mlp, Glm5NextMoE):
-                    hidden_states = self.mlp(hidden_states, forward_batch)
-                else:
-                    hidden_states = self.mlp(hidden_states, forward_batch)
+                hidden_states = self.mlp(hidden_states, forward_batch)
 
         if (
             not (self.dsa_enable_prefill_cp or self.mla_enable_prefill_cp)
@@ -1201,10 +1198,9 @@ class Glm5NextModel(nn.Module):
                 )
             )
         self.layers_to_capture = []
-        if get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mooncake():
-            self.enable_a2a_moe = True
-        else:
-            self.enable_a2a_moe = False
+        self.enable_a2a_moe = (
+            get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mooncake()
+        )
 
     def get_input_embeddings(self) -> torch.Tensor:
         return self.embed_tokens
@@ -1225,18 +1221,13 @@ class Glm5NextModel(nn.Module):
             device=device,
         )
 
-        has_gemm_output_zero_allocator = hasattr(
-            self, "gemm_output_zero_allocator_size"
-        )
-
         gemm_output_zero_allocator = (
             BumpAllocator(
                 buffer_size=self.gemm_output_zero_allocator_size,
                 dtype=torch.float32,
                 device=device,
             )
-            if has_gemm_output_zero_allocator
-            and self.gemm_output_zero_allocator_size > 0
+            if self.gemm_output_zero_allocator_size > 0
             else None
         )
 

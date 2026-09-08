@@ -18,7 +18,7 @@ import triton.language as tl
 from sgl_kernel_npu.fla.utils import input_guard
 
 
-@triton.jit(do_not_specialize=["T"])
+@triton.jit
 def _glm_kda_varlen_recurrent_kernel(
     A_log,
     a,
@@ -33,7 +33,6 @@ def _glm_kda_varlen_recurrent_kernel(
     cu_seqlens,
     scale,
     lower_bound,
-    T,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -145,7 +144,7 @@ def glm_kda_varlen_recurrent_npu(
     if b.shape != v.shape[:-1]:
         raise ValueError("GLM KDA beta must have shape [1,T,HV]")
 
-    _, total_tokens, num_q_heads, key_dim = k.shape
+    num_q_heads, key_dim = k.shape[2:]
     num_value_heads, value_dim = v.shape[2:]
     if a.shape[2:] != (num_value_heads, key_dim):
         raise ValueError("GLM KDA gate must have shape [1,T,HV,K]")
@@ -187,7 +186,6 @@ def glm_kda_varlen_recurrent_npu(
         cu_seqlens=cu_seqlens,
         scale=scale,
         lower_bound=lower_bound,
-        T=total_tokens,
         H=num_q_heads,
         HV=num_value_heads,
         K=key_dim,
