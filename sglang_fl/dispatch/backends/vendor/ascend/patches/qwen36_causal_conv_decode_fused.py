@@ -29,11 +29,15 @@ def _bf16_round_f32(value):
 
 @triton.jit
 def _conv_update_bf16_four_kernel(
-    X, SELECTED, STATES, W, INDICES, OUT, TOTAL,
-    B: tl.constexpr, C: tl.constexpr, SLOTS: tl.constexpr,
-    BLOCK_B: tl.constexpr, BLOCK_C: tl.constexpr,
-    DEBUG_TOTAL: tl.constexpr,
-    TRANSPOSED_WEIGHT: tl.constexpr,
+    X,
+    SELECTED,
+    STATES,
+    W,
+    INDICES,
+    OUT,
+    C: tl.constexpr,
+    SLOTS: tl.constexpr,
+    BLOCK_C: tl.constexpr,
 ):
     # Snapshot selected slots before launching, so duplicate padding indices
     # never read a state concurrently modified by another request program.
@@ -52,16 +56,10 @@ def _conv_update_bf16_four_kernel(
     h1 = h1_bf16.to(tl.float32)
     h2 = h2_bf16.to(tl.float32)
     x = x_bf16.to(tl.float32)
-    if TRANSPOSED_WEIGHT:
-        w0 = tl.load(W + cols, cols < C, other=0).to(tl.float32)
-        w1 = tl.load(W + cols + C, cols < C, other=0).to(tl.float32)
-        w2 = tl.load(W + cols + 2*C, cols < C, other=0).to(tl.float32)
-        w3 = tl.load(W + cols + 3*C, cols < C, other=0).to(tl.float32)
-    else:
-        w0 = tl.load(W + cols * 4, cols < C, other=0).to(tl.float32)
-        w1 = tl.load(W + cols * 4 + 1, cols < C, other=0).to(tl.float32)
-        w2 = tl.load(W + cols * 4 + 2, cols < C, other=0).to(tl.float32)
-        w3 = tl.load(W + cols * 4 + 3, cols < C, other=0).to(tl.float32)
+    w0 = tl.load(W + cols, active, other=0).to(tl.float32)
+    w1 = tl.load(W + cols + C, active, other=0).to(tl.float32)
+    w2 = tl.load(W + cols + 2 * C, active, other=0).to(tl.float32)
+    w3 = tl.load(W + cols + 3 * C, active, other=0).to(tl.float32)
     # Match torch BF16 mul -> native sum -> BF16 SiLU.  Omitting either
     # BF16 conversion changes the reference arithmetic and is not allowed.
     p0 = _bf16_round_f32(h0 * w0)
@@ -69,8 +67,6 @@ def _conv_update_bf16_four_kernel(
     p2 = _bf16_round_f32(h2 * w2)
     p3 = _bf16_round_f32(x * w3)
     total = _bf16_round_f32((p0 + p1) + (p2 + p3))
-    if DEBUG_TOTAL:
-        tl.store(TOTAL + x_off, total, active)
     out = tl.fdiv(total, 1.0 + tl.exp(-total))
     tl.store(OUT + x_off, out, active)
     tl.store(STATES + state_off, h1_bf16, active)
@@ -78,17 +74,22 @@ def _conv_update_bf16_four_kernel(
     tl.store(STATES + state_off + 2 * C, x_bf16, active)
 
 
-def fused_decode_conv(x, states, weight, indices, debug_total=None, block_channels=512, transposed_weight=False):
+def fused_decode_conv(x, states, transposed_weight, indices):
+    """Production decode path: contiguous [4, C] weights and 2048-channel tiles."""
     batch, channels = x.shape
     output = torch.empty_like(x)
     selected = states[indices]
-    block_batch = 1
+    block_channels = 2048
     _conv_update_bf16_four_kernel[(batch, triton.cdiv(channels, block_channels))](
-        x, selected, states, weight, indices, output, debug_total,
-        B=batch, C=channels, SLOTS=states.shape[0],
-        BLOCK_B=block_batch, BLOCK_C=block_channels,
-        DEBUG_TOTAL=debug_total is not None,
-        TRANSPOSED_WEIGHT=transposed_weight,
+        x,
+        selected,
+        states,
+        transposed_weight,
+        indices,
+        output,
+        C=channels,
+        SLOTS=states.shape[0],
+        BLOCK_C=block_channels,
         num_warps=1,
         enable_fp_fusion=False,
     )
@@ -134,6 +135,7 @@ def _supported(x, states, layer, forward_batch, indices):
     ):
         return False
     import torch_npu
+
     # Blocked formats can report is_contiguous() but are not row-major.
     if any(torch_npu.get_npu_format(t) != 2 for t in (x, weight, indices)):
         return False
@@ -159,17 +161,28 @@ def patch_qwen36_causal_conv_decode_fused():
     if "silu" in excluded:
         return False
     try:
-        from sglang.srt.hardware_backend.npu.attention import ascend_gdn_backend as module
+        from sglang.srt.hardware_backend.npu.attention import (
+            ascend_gdn_backend as module,
+        )
+
         original = module.AscendGDNAttnBackend.forward_decode
         if getattr(original, _MARKER, False):
             return False
         if tuple(inspect.signature(original).parameters) != (
-            "self", "layer", "forward_batch", "mixed_qkv", "a", "b", "kwargs"
+            "self",
+            "layer",
+            "forward_batch",
+            "mixed_qkv",
+            "a",
+            "b",
+            "kwargs",
         ):
             return False
         backend_source = inspect.getsource(original)
         update_source = inspect.getsource(module.causal_conv1d_update)
-        replay_source = inspect.getsource(module.AscendMambaAttnBackendBase._replay_metadata)
+        replay_source = inspect.getsource(
+            module.AscendMambaAttnBackendBase._replay_metadata
+        )
         if not (
             "conv_states.transpose(1, 2).clone()" in backend_source
             and "conv_states[:] = conv_states_tmp.transpose(1, 2)" in backend_source
@@ -192,12 +205,13 @@ def patch_qwen36_causal_conv_decode_fused():
             return original(self, layer, forward_batch, mixed_qkv, a, b, **kwargs)
         weight = _transposed_weight(layer)
         if not getattr(self, "_sglang_fl_fused_conv_logged", False):
-            logger.info("Fused BF16 decode convolution active: input=%s pool=%s", tuple(mixed_qkv.shape), tuple(states.shape))
+            logger.info(
+                "Fused BF16 decode convolution active: input=%s pool=%s",
+                tuple(mixed_qkv.shape),
+                tuple(states.shape),
+            )
             self._sglang_fl_fused_conv_logged = True
-        mixed_qkv = fused_decode_conv(
-            mixed_qkv, states, weight, indices,
-            block_channels=2048, transposed_weight=True,
-        )
+        mixed_qkv = fused_decode_conv(mixed_qkv, states, weight, indices)
         query, key, value = torch.split(
             mixed_qkv, [layer.q_dim, layer.k_dim, layer.v_dim], dim=-1
         )
@@ -207,9 +221,15 @@ def patch_qwen36_causal_conv_decode_fused():
         value = value.view(1, bs, layer.num_v_heads, layer.head_v_dim)
         ssm_states = layer_cache.temporal
         result = self.kernel_dispatcher.decode(
-            q=query, k=key, v=value, a=a, b=b,
-            A_log=layer.A_log, dt_bias=layer.dt_bias,
-            ssm_states=ssm_states, cache_indices=indices,
+            q=query,
+            k=key,
+            v=value,
+            a=a,
+            b=b,
+            A_log=layer.A_log,
+            dt_bias=layer.dt_bias,
+            ssm_states=ssm_states,
+            cache_indices=indices,
             query_start_loc=self.forward_metadata.query_start_loc,
         )
         self._track_mamba_state_decode(forward_batch, states, ssm_states, indices)
@@ -217,5 +237,7 @@ def patch_qwen36_causal_conv_decode_fused():
 
     setattr(forward_decode, _MARKER, True)
     module.AscendGDNAttnBackend.forward_decode = forward_decode
-    logger.info("Installed BF16 decode convolution fusion with explicit intermediate rounding")
+    logger.info(
+        "Installed BF16 decode convolution fusion with explicit intermediate rounding"
+    )
     return True

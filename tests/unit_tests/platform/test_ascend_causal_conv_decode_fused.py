@@ -19,6 +19,7 @@ try:
     import torch
     import torch_npu
     import flag_gems
+
     _AVAILABLE = torch.npu.is_available()
 except (ImportError, AttributeError, RuntimeError):
     _AVAILABLE = False
@@ -29,11 +30,15 @@ class TestAscendCausalConvDecodeFused(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         root = Path(__file__).resolve().parents[3]
-        path = root / "sglang_fl/dispatch/backends/vendor/ascend/patches/qwen36_causal_conv_decode_fused.py"
+        path = (
+            root
+            / "sglang_fl/dispatch/backends/vendor/ascend/patches/qwen36_causal_conv_decode_fused.py"
+        )
         spec = importlib.util.spec_from_file_location("conv_decode_under_test", path)
         cls.mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.mod)
         from sgl_kernel_npu.mamba.causal_conv1d import causal_conv1d_update_npu
+
         cls.native_update = staticmethod(causal_conv1d_update_npu)
         torch.npu.set_device(0)
         cls.gems_context = flag_gems.use_gems(
@@ -68,15 +73,19 @@ class TestAscendCausalConvDecodeFused(unittest.TestCase):
     def candidate(self, x, states, weight, indices):
         transposed = self.mod._transposed_weight(SimpleNamespace(conv_weights=weight))
         return self.mod.fused_decode_conv(
-            x, states, transposed, indices,
-            block_channels=2048, transposed_weight=True,
+            x,
+            states,
+            transposed,
+            indices,
         )
 
     def assertBitsEqual(self, actual, expected):
-        self.assertTrue(torch.equal(
-            actual.detach().cpu().contiguous().view(torch.int16),
-            expected.detach().cpu().contiguous().view(torch.int16),
-        ))
+        self.assertTrue(
+            torch.equal(
+                actual.detach().cpu().contiguous().view(torch.int16),
+                expected.detach().cpu().contiguous().view(torch.int16),
+            )
+        )
 
     def test_guards_and_real_blocked_format(self):
         x, weight = self.random((8, 5120)), self.random((5120, 4))
@@ -91,7 +100,9 @@ class TestAscendCausalConvDecodeFused(unittest.TestCase):
             batch.batch_size = 7
             self.assertFalse(self.mod._supported(x, states, layer, batch, indices))
             batch.batch_size = 8
-            self.assertFalse(self.mod._supported(x[:, ::2], states, layer, batch, indices))
+            self.assertFalse(
+                self.mod._supported(x[:, ::2], states, layer, batch, indices)
+            )
             layer.bias = torch.zeros(5120, dtype=x.dtype, device="npu")
             self.assertFalse(self.mod._supported(x, states, layer, batch, indices))
             layer.bias = None
@@ -111,20 +122,30 @@ class TestAscendCausalConvDecodeFused(unittest.TestCase):
         self.assertFalse(self.mod._supported(x, states, layer, batch, indices))
 
     def test_installer_contract_and_custom_dispatch(self):
-        from sglang.srt.hardware_backend.npu.attention import ascend_gdn_backend as backend
+        from sglang.srt.hardware_backend.npu.attention import (
+            ascend_gdn_backend as backend,
+        )
+
         original = backend.AscendGDNAttnBackend.forward_decode
         if getattr(original, self.mod._MARKER, False):
             original = original.__wrapped__
         env = {
-            "SGLANG_FL_FUSED_CONV_DECODE": "1", "USE_FLAGGEMS": "1",
-            "SGLANG_FL_FLAGOS_WHITELIST": "", "SGLANG_FL_FLAGOS_BLACKLIST": "sum_dim,mul",
+            "SGLANG_FL_FUSED_CONV_DECODE": "1",
+            "USE_FLAGGEMS": "1",
+            "SGLANG_FL_FLAGOS_WHITELIST": "",
+            "SGLANG_FL_FLAGOS_BLACKLIST": "sum_dim,mul",
         }
-        with mock.patch.dict(os.environ, env), mock.patch.object(
-            backend.AscendGDNAttnBackend, "forward_decode", original
+        with (
+            mock.patch.dict(os.environ, env),
+            mock.patch.object(backend.AscendGDNAttnBackend, "forward_decode", original),
         ):
-            with mock.patch.object(self.mod.inspect, "signature", side_effect=ValueError("unknown")):
+            with mock.patch.object(
+                self.mod.inspect, "signature", side_effect=ValueError("unknown")
+            ):
                 self.assertFalse(self.mod.patch_qwen36_causal_conv_decode_fused())
-            with mock.patch.object(self.mod.inspect, "getsource", return_value="upstream changed"):
+            with mock.patch.object(
+                self.mod.inspect, "getsource", return_value="upstream changed"
+            ):
                 self.assertFalse(self.mod.patch_qwen36_causal_conv_decode_fused())
             for extra in (
                 {"SGLANG_FL_FUSED_CONV_DECODE": "0"},
@@ -145,24 +166,45 @@ class TestAscendCausalConvDecodeFused(unittest.TestCase):
             for batch, padding in ((1, 0), (24, 2), (64, 0), (64, 23)):
                 with self.subTest(channels=channels, batch=batch, padding=padding):
                     valid = batch - padding
-                    pools = [torch.zeros((2, 65, 3, channels), dtype=torch.bfloat16, device="npu") for _ in range(2)]
+                    pools = [
+                        torch.zeros(
+                            (2, 65, 3, channels), dtype=torch.bfloat16, device="npu"
+                        )
+                        for _ in range(2)
+                    ]
                     states = [pool[1] for pool in pools]
                     initial = self.random((65, 3, channels))
                     for state in states:
                         state.copy_(initial)
                     self.assertEqual(torch_npu.get_npu_format(states[0]), 0)
                     self.assertGreater(states[0].storage_offset(), 0)
-                    x, weight = self.random((batch, channels)), self.random((channels, 4))
-                    indices = torch.cat((torch.arange(1, valid + 1), torch.zeros(padding, dtype=torch.int64))).to("npu")
+                    x, weight = (
+                        self.random((batch, channels)),
+                        self.random((channels, 4)),
+                    )
+                    indices = torch.cat(
+                        (
+                            torch.arange(1, valid + 1),
+                            torch.zeros(padding, dtype=torch.int64),
+                        )
+                    ).to("npu")
                     graphs, outputs = [torch.npu.NPUGraph(), torch.npu.NPUGraph()], []
-                    for graph, state, fn in zip(graphs, states, (self.control, self.candidate)):
+                    for graph, state, fn in zip(
+                        graphs, states, (self.control, self.candidate)
+                    ):
                         with torch.npu.graph(graph):
                             outputs.append(fn(x, state, weight, indices))
                     for _ in range(8):
                         x.copy_(self.random((batch, channels)))
-                        weight.add_(0.03125)  # No graph recapture: transpose must replay.
+                        weight.add_(
+                            0.03125
+                        )  # No graph recapture: transpose must replay.
                         new_indices = torch.randperm(64, device="cpu")[:valid] + 1
-                        indices.copy_(torch.cat((new_indices, torch.zeros(padding, dtype=torch.int64))).to("npu"))
+                        indices.copy_(
+                            torch.cat(
+                                (new_indices, torch.zeros(padding, dtype=torch.int64))
+                            ).to("npu")
+                        )
                         for graph in graphs:
                             graph.replay()
                         torch.npu.synchronize()
@@ -174,26 +216,34 @@ class TestAscendCausalConvDecodeFused(unittest.TestCase):
     def test_fixed_cancellation_patterns(self):
         patterns = set()
         for values in (
-            (2.**30, 1., -2.**30, 1.),
-            (2.**25, 1., -2.**25, -1.),
-            (2.**16, 2.**-8, -2.**16, 2.**-8),
-            (2.**120, 2.**96, -2.**120, 2.**96),
+            (2.0**30, 1.0, -(2.0**30), 1.0),
+            (2.0**25, 1.0, -(2.0**25), -1.0),
+            (2.0**16, 2.0**-8, -(2.0**16), 2.0**-8),
+            (2.0**120, 2.0**96, -(2.0**120), 2.0**96),
         ):
             patterns.update(itertools.permutations(values))
         base = torch.tensor(sorted(patterns), dtype=torch.bfloat16)
         for channels in (4096, 5120):
-            data = base.repeat((channels + len(base) - 1) // len(base), 1)[:channels].to("npu")
+            data = base.repeat((channels + len(base) - 1) // len(base), 1)[
+                :channels
+            ].to("npu")
             states = torch.zeros((65, 3, channels), dtype=torch.bfloat16, device="npu")
             states[1:9] = data[:, :3].T.unsqueeze(0)
             other = states.clone()
             x = data[:, 3].repeat(8, 1)
             weight = torch.ones((channels, 4), dtype=x.dtype, device="npu")
             indices = torch.arange(1, 9, dtype=torch.int64, device="npu")
-            self.assertBitsEqual(self.control(x, states, weight, indices), self.candidate(x, other, weight, indices))
+            self.assertBitsEqual(
+                self.control(x, states, weight, indices),
+                self.candidate(x, other, weight, indices),
+            )
             self.assertBitsEqual(states, other)
 
     def test_special_value_semantics(self):
-        values = torch.tensor([float("nan"), float("inf"), -float("inf"), 0., -0., 1., -1., 2.**-30], dtype=torch.bfloat16)
+        values = torch.tensor(
+            [float("nan"), float("inf"), -float("inf"), 0.0, -0.0, 1.0, -1.0, 2.0**-30],
+            dtype=torch.bfloat16,
+        )
         for channels in (4096, 5120):
             x = values.repeat(channels // 8).repeat(8, 1).to("npu")
             states = torch.zeros((65, 3, channels), dtype=x.dtype, device="npu")
