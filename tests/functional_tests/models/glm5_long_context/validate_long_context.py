@@ -164,6 +164,7 @@ def main():
     parser.add_argument("--model", default="GLM-5.3-Flash")
     parser.add_argument("--model-path", default="/models/GLM-5.3-Flash-BF16")
     parser.add_argument("--model-kind", choices=["hy4", "glm"], default="glm")
+    parser.add_argument("--reasoning-effort", choices=["low", "high", "max"])
     parser.add_argument("--lengths", type=int, nargs="+", default=[32768, 131072])
     parser.add_argument("--cases", nargs="+", choices=CASES, default=list(CASES))
     parser.add_argument("--repeats", type=int, default=2)
@@ -175,6 +176,8 @@ def main():
     args = parser.parse_args()
     if min(args.lengths) < 512 or args.repeats < 1:
         parser.error("lengths must be >=512 and repeats >=1")
+    if args.reasoning_effort and args.model_kind != "glm":
+        parser.error("--reasoning-effort is a GLM-only override")
     from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
     tokenizer_config = json.loads(
@@ -197,7 +200,8 @@ def main():
     if template_path.exists():
         tokenizer.chat_template = template_path.read_text()
     template_kwargs = {
-        "reasoning_effort": "no_think" if args.model_kind == "hy4" else "low"
+        "reasoning_effort": args.reasoning_effort
+        or ("no_think" if args.model_kind == "hy4" else "low")
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # Each record is comfortably longer than 16 tokens for either checkpoint;

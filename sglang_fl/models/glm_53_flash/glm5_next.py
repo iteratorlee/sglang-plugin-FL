@@ -7,6 +7,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from .checkpoint import canonical_weight_name
 from .mhc import hc_post as _hc_post_fn
 from .mhc import hc_pre as _hc_pre_fn
 from sglang.srt.batch_overlap.two_batch_overlap import (
@@ -1358,6 +1359,11 @@ class Glm5NextForConditionalGeneration(nn.Module):
         self.mm_config = config
         text_config = config.text_config
 
+        if quant_config is not None and quant_config.get_name() == "modelslim":
+            from .modelslim import GlmModelSlimConfig
+
+            quant_config = GlmModelSlimConfig(quant_config)
+
         self.fuse_qkv_a_proj = getattr(text_config, "q_lora_rank", None) is not None
 
         self.pp_group = get_pp_group()
@@ -1653,12 +1659,10 @@ class Glm5NextForConditionalGeneration(nn.Module):
             fused_cat_dim = 0
 
         params_dict = dict(self.named_parameters())
+        loaded_params = set()
         weight_names = []
         for name, loaded_weight in weights:
-            if "language_model." in name:
-                name = name.replace("language_model.", "")
-            if "model.visual." in name:
-                name = name.replace("model.visual.", "visual.")
+            name = canonical_weight_name(name)
 
             if "visual" in name:
                 name = name.replace("attn.qkv.", "attn.qkv_proj.")
@@ -1729,6 +1733,7 @@ class Glm5NextForConditionalGeneration(nn.Module):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(name)
                 break
             else:
                 is_expert_weight = False
@@ -1749,6 +1754,7 @@ class Glm5NextForConditionalGeneration(nn.Module):
                         shard_id=shard_id,
                         expert_id=expert_id,
                     )
+                    loaded_params.add(name)
                     break
                 else:
                     if is_expert_weight:
@@ -1795,6 +1801,7 @@ class Glm5NextForConditionalGeneration(nn.Module):
                                     param, "weight_loader", default_weight_loader
                                 )
                                 weight_loader(param, fused_weight)
+                                loaded_params.add(target)
                             cached_a_proj.pop(q_a_proj_name, None)
                             cached_a_proj.pop(kv_a_proj_name, None)
                         continue
@@ -1810,6 +1817,24 @@ class Glm5NextForConditionalGeneration(nn.Module):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
+                    loaded_params.add(name)
+
+        if qc is not None and qc.get_name() == "modelslim" and not is_nextn:
+            # ModelSlim can rename modules independently of the BF16 export.
+            # Never let a missing attention/mHC/quantization parameter silently
+            # survive as torch.empty. RMSNorm anti-bias is initialized to zero
+            # by the stock config, so absent synthetic biases are legitimate.
+            missing = sorted(
+                name
+                for name in params_dict.keys() - loaded_params
+                if name.startswith("model.layers.") and not name.endswith(".bias")
+            )
+            if missing:
+                raise ValueError(f"Unloaded GLM ModelSlim parameters: {missing}")
+            logger.info(
+                "GLM ModelSlim parameter coverage verified (%d loaded)",
+                len(loaded_params),
+            )
 
         if is_nextn:
             decoder_attn = getattr(self.model.decoder, "self_attn", None)
