@@ -72,7 +72,7 @@ def _expert_reference(x, w13, w2, s13, s2, counts):
     return torch.cat(outputs)
 
 
-@pytest.mark.parametrize("counts", [[5, 0, 27], [0, 32, 0]])
+@pytest.mark.parametrize("counts", [[5, 0, 27], [0, 32, 0], [0] * 17 + [32]])
 def test_w8a8_experts_reference_and_graph(counts, record_property):
     import torch_npu
     from sglang_fl.models.glm_53_flash.modelslim import GlmW8A8MoEMethod
@@ -160,7 +160,11 @@ def test_w8a8_experts_reference_and_graph(counts, record_property):
 
     # Routing changes every token. Replay must consume the new histogram,
     # including transitions between empty and non-empty experts.
-    for new_counts in ([27, 5, 0], [0, 0, 32], [16, 0, 16]):
+    for new_counts in (
+        [27, 5] + [0] * (experts - 2),
+        [0] * (experts - 1) + [32],
+        [16] + [0] * (experts - 2) + [16],
+    ):
         group_list.copy_(torch.tensor(new_counts, dtype=torch.int64, device="npu"))
         changed_eager = run()
         graph.replay()
