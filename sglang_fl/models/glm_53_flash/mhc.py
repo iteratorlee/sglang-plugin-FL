@@ -1,7 +1,7 @@
 """Graph-safe PyTorch mHC reference used on Ascend.
 
-The implementation follows the model vendor's equations.  It deliberately
-uses regular PyTorch operators so torch-npu can capture it in an NPU graph.
+The PyTorch reference follows the model vendor's equations. Ascend
+batches through the 4K prefill chunk use fused kernels; larger prefill batches retain the reference path.
 """
 
 import torch
@@ -16,7 +16,7 @@ def hc_contract(x: torch.Tensor, n: int) -> torch.Tensor:
     return x.unflatten(-1, (n, -1)).mean(dim=-2)
 
 
-def hc_pre(
+def _hc_pre_reference(
     x: torch.Tensor,
     hc_fn: torch.Tensor,
     hc_scale: torch.Tensor,
@@ -61,7 +61,7 @@ def hc_pre(
     return layer_input, comb.reshape(tokens, -1), post, False
 
 
-def hc_post(
+def _hc_post_reference(
     x: torch.Tensor,
     residual: torch.Tensor,
     h_post: torch.Tensor,
@@ -78,3 +78,72 @@ def hc_post(
         dim=1
     )
     return out.to(x.dtype).reshape(tokens, -1)
+
+
+def hc_pre(
+    x,
+    hc_fn,
+    hc_scale,
+    hc_base,
+    hc_mult,
+    rms_eps,
+    hc_eps,
+    sinkhorn_iters,
+    post_mult_value=2.0,
+    hc_norm_weight=None,
+    out_norm_weight=None,
+    out_norm_eps=None,
+):
+    # Validate only the GLM shapes measured through the 4K prefill chunk.
+    # Larger batches and other devices retain the reference equations.
+    if (
+        x.device.type == "npu"
+        and x.dtype == torch.bfloat16
+        and hc_mult == 4
+        and x.shape[-1] == 16384
+        and x.shape[0] <= 4096
+    ):
+        from .mhc_npu import hc_pre as fused
+
+        return fused(
+            x,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            hc_mult,
+            rms_eps,
+            hc_eps,
+            sinkhorn_iters,
+            post_mult_value,
+            hc_norm_weight,
+            out_norm_weight,
+            out_norm_eps,
+        )
+    return _hc_pre_reference(
+        x,
+        hc_fn,
+        hc_scale,
+        hc_base,
+        hc_mult,
+        rms_eps,
+        hc_eps,
+        sinkhorn_iters,
+        post_mult_value,
+        hc_norm_weight,
+        out_norm_weight,
+        out_norm_eps,
+    )
+
+
+def hc_post(x, residual, h_post, h_res, hc_mult):
+    if (
+        x.device.type == "npu"
+        and x.dtype == torch.bfloat16
+        and hc_mult == 4
+        and x.shape[-1] == 4096
+        and x.shape[0] <= 4096
+    ):
+        from .mhc_npu import hc_post as fused
+
+        return fused(x, residual, h_post, h_res, hc_mult)
+    return _hc_post_reference(x, residual, h_post, h_res, hc_mult)

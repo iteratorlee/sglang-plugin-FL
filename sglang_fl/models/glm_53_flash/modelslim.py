@@ -5,6 +5,10 @@ may communicate BF16; that is independent of the expert compute precision.
 """
 
 from copy import deepcopy
+import logging
+import json
+import os
+from pathlib import Path
 
 import torch
 
@@ -54,6 +58,8 @@ class _GlmW8A8MoEScheme(ModelSlimW8A8Int8MoE):
 
 class GlmW8A8MoEMethod(NPUW8A8Int8DynamicMoEMethod):
     """DeepEP's grouped expert path with GLM's pre-SiLU clamp restored."""
+
+    _audited_shapes = set()
 
     def apply(self, layer, dispatch_output):
         # The stock Standard-dispatch kernel lacks GLM's activation clamp.
@@ -108,6 +114,54 @@ class GlmW8A8MoEMethod(NPUW8A8Int8DynamicMoEMethod):
             )
         if hidden_states_scale is None:
             raise ValueError("INT8 expert activations require per-token scales")
+
+        if any(
+            t.dtype != torch.int8
+            for t in (hidden_states, layer.w13_weight, layer.w2_weight)
+        ):
+            raise TypeError(
+                "GLM W8A8 expert GEMMs require INT8 activations and weights"
+            )
+        shape = tuple(hidden_states.shape)
+        if shape not in self._audited_shapes and len(self._audited_shapes) < 4:
+            self._audited_shapes.add(shape)
+            logging.getLogger(__name__).info(
+                "GLM W8A8 compute audit: x=%s %s, w13=%s %s, w2=%s %s, "
+                "GEMM1/GEMM2=int8*int8->int32, output_scale=%s",
+                shape,
+                hidden_states.dtype,
+                tuple(layer.w13_weight.shape),
+                layer.w13_weight.dtype,
+                tuple(layer.w2_weight.shape),
+                layer.w2_weight.dtype,
+                layer.w2_weight_scale.dtype,
+            )
+
+            audit_dir = os.getenv("SGLANG_FL_GLM53_AUDIT_DIR")
+            if audit_dir:
+                directory = Path(audit_dir)
+                directory.mkdir(parents=True, exist_ok=True)
+                with (directory / f"experts-{os.getpid()}.jsonl").open("a") as stream:
+                    stream.write(
+                        json.dumps(
+                            {
+                                "source": __file__,
+                                "input_shape": shape,
+                                "input_dtype": str(hidden_states.dtype),
+                                "w13_shape": list(layer.w13_weight.shape),
+                                "w13_dtype": str(layer.w13_weight.dtype),
+                                "w2_shape": list(layer.w2_weight.shape),
+                                "w2_dtype": str(layer.w2_weight.dtype),
+                                "scale_dtype": str(layer.w2_weight_scale.dtype),
+                                "gemm1": "int8*int8->int32",
+                                "gemm2": "int8*int8->int32",
+                                "triton_parallel_mode": os.getenv(
+                                    "TRITON_ALL_BLOCKS_PARALLEL"
+                                ),
+                            }
+                        )
+                        + "\n"
+                    )
 
         gate_up_int32 = torch.ops.npu.npu_grouped_matmul(
             x=[hidden_states],
