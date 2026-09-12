@@ -262,16 +262,13 @@ class Glm5NextMoE(DeepseekV2MoE):
                 self.shared_experts.act_fn = _ClampedSiluAndMul(limit)
 
     def forward(self, hidden_states, forward_batch):
-        # v0.5.11 DeepEP normal/low-latency NPU dispatch may use INT8/FP8
-        # communication.  Its unquantized expert runner then selects the BF16
-        # grouped-matmul path from the checkpoint weight dtype, producing the
-        # unsupported INT8-input/BF16-weight pair.  SGLang already exposes the
-        # intended NPU compatibility switch and uses a scoped override for its
-        # own unquantized MTP models.  Apply the same scope only to GLM's MoE;
-        # other models and CUDA keep their original dispatch policy.
+        # Floating-weight experts require BF16 transport: INT8 input with
+        # BF16 weights is unsupported by their grouped-matmul runner. W8A8
+        # experts accept native quantized dispatch and its per-token scales,
+        # avoiding a second dynamic quantization of the padded receive buffer.
         dispatch_scope = (
             envs.SGLANG_DEEPEP_BF16_DISPATCH.override(True)
-            if is_npu()
+            if is_npu() and self.experts.w13_weight.dtype != torch.int8
             else nullcontext()
         )
         with dispatch_scope:

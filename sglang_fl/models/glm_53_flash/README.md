@@ -22,12 +22,13 @@
 
 以下配置针对 16 个逻辑 NPU、单请求最长 128K 的验证资源预算。
 模型配置中的更大最大长度不等于已经验证的容量。保持 plugin 的 Ascend
-安全 FlagGems allowlist；额外屏蔽 OOT `RMSNorm`，不关闭 plugin/FlagGems。
+专用 NPU kernel；关闭全部 FlagGems 替换，额外屏蔽 OOT `RMSNorm`。
 
 ```bash
-export USE_FLAGGEMS=1
+export USE_FLAGGEMS=0
+export SGLANG_FLAGGEMS_RECORD=0
 export SGLANG_FL_OOT_BLACKLIST=RMSNorm
-export SGLANG_DEEPEP_BF16_DISPATCH=1
+export SGLANG_DEEPEP_BF16_DISPATCH=0
 export HCCL_BUFFSIZE=4096
 export HCCL_DETERMINISTIC=true
 
@@ -36,8 +37,8 @@ python -m sglang.launch_server \
   --trust-remote-code --quantization modelslim \
   --dtype bfloat16 --kv-cache-dtype bfloat16 \
   --tp-size 16 --ep-size 16 --moe-a2a-backend deepep \
-  --mem-fraction-static 0.78 --max-running-requests 2 \
-  --max-total-tokens 196608 --max-prefill-tokens 4096 \
+  --mem-fraction-static 0.78 --max-running-requests 1 \
+  --max-total-tokens 196608 --max-prefill-tokens 8192 \
   --chunked-prefill-size 4096 --page-size 64 --disable-radix-cache \
   --cuda-graph-bs 16 --cuda-graph-max-bs 16 --disable-piecewise-cuda-graph \
   --disable-custom-all-reduce --weight-loader-disable-mmap \
@@ -47,7 +48,8 @@ python -m sglang.launch_server \
 
 `--disable-piecewise-cuda-graph` 不会关闭 decode graph；检查各 rank 的
 capture 完成日志和实际请求的 `cuda graph: True` 日志。固定 bs=16 用于
-补齐图输入，`--max-running-requests 2` 限制实际并发和 KDA 状态容量。
+补齐图输入，`--max-running-requests 1` 限制实际并发和 KDA 状态容量。
+64k / 128k 性能配置均为单并发、1k 输出，避免 chunk prefill 导致第二个请求等待。
 
 官方模板默认推理档为 `max`（不传 `chat_template_kwargs`，或显式传
 `{"reasoning_effort":"max"}`），也支持 `high` / `low`。更换档位会改变
@@ -72,3 +74,20 @@ HTTP 验证工具在 `tests/functional_tests/models/glm5_long_context/`：
 长输入用 checkpoint
 tokenizer/template 构造，并检查服务实际 token 数、完整 JSON、正常 stop
 及重复请求最终答案一致性。完整请求和原始响应保留供独立审计。
+
+## 推理优化与通信精度
+
+W8A8 专家允许原生 INT8 DeepEP low-latency dispatch，直接使用通信返回的
+INT8 激活和逐 token scale，省去对填充接收缓冲区的二次动态量化。
+`SGLANG_DEEPEP_BF16_DISPATCH=1` 仍可显式恢复 BF16 传输；浮点权重的专家
+始终保留 BF16 通信兼容保护。两种传输方式下，W8A8 专家计算均为
+INT8×INT8→INT32，不将权重反量化为 BF16 后做 GEMM。
+
+专用 mHC kernel 融合系数 / 20 次 Sinkhorn 迭代 / 残差混合；专家输出
+dequant 仅处理设备端路由计数指定的有效行，并保留填充区为零。
+可设置 `SGLANG_FL_GLM53_AUDIT_DIR` 保存每个 worker 的有界 dtype 审计。
+新增 NPU 回归见 `test_glm5_mhc_fused.py` 和 `test_glm5_quant_dequant.py`，
+与原 W8A8 测试合计 37 项通过。有限语义验收不代表完整质量或逐 token 等价。
+
+本镜像应给生产服务使用独立 Triton cache；不要混用不同
+`TRITON_ALL_BLOCKS_PARALLEL` 编译模式产生的缓存。

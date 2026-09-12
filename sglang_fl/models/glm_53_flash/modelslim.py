@@ -108,6 +108,7 @@ class GlmW8A8MoEMethod(NPUW8A8Int8DynamicMoEMethod):
     ):
         if group_list_type != 1:
             raise ValueError("GLM DeepEP W8A8 expects per-expert token counts")
+        dispatch_dtype = str(hidden_states.dtype)
         if hidden_states.dtype != torch.int8:
             hidden_states, hidden_states_scale = torch.ops.npu.npu_dynamic_quant(
                 hidden_states
@@ -148,6 +149,7 @@ class GlmW8A8MoEMethod(NPUW8A8Int8DynamicMoEMethod):
                                 "source": __file__,
                                 "input_shape": shape,
                                 "input_dtype": str(hidden_states.dtype),
+                                "dispatch_dtype": dispatch_dtype,
                                 "w13_shape": list(layer.w13_weight.shape),
                                 "w13_dtype": str(layer.w13_weight.dtype),
                                 "w2_shape": list(layer.w2_weight.shape),
