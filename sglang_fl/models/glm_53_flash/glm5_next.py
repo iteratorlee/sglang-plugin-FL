@@ -425,8 +425,10 @@ class Glm5NextVisionModel(GlmOcrVisionModel):
 
 
 def get_embedding_tp_kwargs():
-    """v0.5.11 embeddings already select the tensor-parallel group."""
-    return {}
+    """Reduce embeddings within the ranks serving the same DP requests."""
+    from sglang.srt.layers.dp_attention import is_dp_attention_enabled
+
+    return {"use_attn_tp_group": is_dp_attention_enabled()}
 
 
 def _prepare_glm_kda_gates(
