@@ -4,10 +4,11 @@ import pytest
 import torch
 
 
+@pytest.mark.parametrize("dim", [768, 1536, 3072, 6144])
 @pytest.mark.parametrize("batch", [1, 16])
 @pytest.mark.parametrize("weight_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("magnitude", [0.0, 1.0, 10.0])
-def test_causal_conv_multistep_graph(batch, weight_dtype, magnitude):
+def test_causal_conv_multistep_graph(dim, batch, weight_dtype, magnitude):
     import torch_npu
     from sglang_fl.models.glm_53_flash.causal_conv_npu import (
         causal_conv_step,
@@ -16,7 +17,6 @@ def test_causal_conv_multistep_graph(batch, weight_dtype, magnitude):
 
     torch.npu.set_device(0)
     torch.manual_seed(20260913)
-    dim = 1536
     weight_cpu = (torch.randn(dim, 4) * 0.2).to(weight_dtype)
     state_cpu = (torch.randn(40, dim, 3) * magnitude).bfloat16()
     x = torch.zeros(batch, dim, device="npu", dtype=torch.bfloat16)
@@ -33,8 +33,11 @@ def test_causal_conv_multistep_graph(batch, weight_dtype, magnitude):
         input_cpu = (torch.randn(batch, dim) * magnitude).bfloat16()
         # Include all-padding and fully occupied steps, plus moving live slots.
         slots = [
-            0 if step == 0 or (step % 3 == 0 and i % 2 == 0)
-            else i + 1 + (step % 2) * batch
+            (
+                0
+                if step == 0 or (step % 3 == 0 and i % 2 == 0)
+                else i + 1 + (step % 2) * batch
+            )
             for i in range(batch)
         ]
         expected = input_cpu.clone()

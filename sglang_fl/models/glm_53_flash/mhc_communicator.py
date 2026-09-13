@@ -1,10 +1,19 @@
-"""TP-only mHC layer communicator for GLM-5.3 on SGLang v0.5.11."""
+"""mHC boundaries for attention TP/DP and token-sharded expert parallelism."""
 
 from dataclasses import dataclass
 
 import torch
 
-from sglang.srt.distributed import tensor_model_parallel_all_reduce
+from sglang.srt.distributed import attention_tensor_model_parallel_all_reduce
+from sglang.srt.layers.communicator import ScatterMode
+from sglang.srt.layers.dp_attention import (
+    _dp_gather_via_all_reduce,
+    dp_scatter,
+    get_attention_dp_size,
+    get_attention_tp_rank,
+    get_attention_tp_size,
+    get_global_dp_buffer,
+)
 
 from .mhc import hc_contract, hc_expand
 
@@ -28,7 +37,8 @@ class _State:
         # runtime. Other backends may add ModelSlim anti-bias or change casts.
         # Keep calling their own norm instead of silently changing semantics.
         if (
-            getattr(norm._forward_method, "__func__", None) is not RMSNorm.forward_native
+            getattr(norm._forward_method, "__func__", None)
+            is not RMSNorm.forward_native
             or norm.cast_x_before_out_mul
             or norm.override_orig_dtype is not None
             or norm.variance_size_override is not None
@@ -49,13 +59,12 @@ class _State:
 
 
 class MHCLayerCommunicator:
-    """Minimal communicator for the requested TP16, DP1 execution mode.
+    """Keep mHC residuals local to attention DP, distributing MLP tokens.
 
-    Attention projections are constructed with ``reduce_results=False`` so an
-    explicit TP all-reduce is required before the mHC attention-to-MLP bridge.
-    Dense and MoE blocks in v0.5.11 already reduce their own row-parallel
-    result, therefore the post-MLP bridge only applies mHC and contracts the
-    final layer.
+    Each attention-TP group reduces its own attention output. Sparse MLPs
+    receive a disjoint token slice per rank; their DeepEP result is gathered
+    back within that attention group before mHC post-mixing. Dense TP MLPs
+    gather/scatter across attention DP using SGLang's padded-token metadata.
     """
 
     def __init__(
@@ -73,7 +82,11 @@ class MHCLayerCommunicator:
         hc_ffn_pre,
         hc_post,
     ):
-        del layer_scatter_modes, allow_reduce_scatter, qkv_latent_func
+        del allow_reduce_scatter, qkv_latent_func
+        self.mlp_scattered = layer_scatter_modes.mlp_mode == ScatterMode.SCATTERED
+        self.attn_tp_size = get_attention_tp_size()
+        self.attn_tp_rank = get_attention_tp_rank()
+        self.attn_dp_size = get_attention_dp_size()
         self.input_layernorm = input_layernorm
         self.post_attention_layernorm = post_attention_layernorm
         self.is_first_layer = is_first_layer
@@ -87,15 +100,49 @@ class MHCLayerCommunicator:
         return self.mhc.split(hidden_states, self.mhc.hc_attn_pre, self.input_layernorm)
 
     def prepare_mlp(self, hidden_states, residual, forward_batch, cache=None):
-        del forward_batch, cache
-        hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+        del cache
+        hidden_states = attention_tensor_model_parallel_all_reduce(hidden_states)
         hidden_states = self.mhc.combine(hidden_states, residual)
-        return self.mhc.split(
+        hidden_states, residual = self.mhc.split(
             hidden_states, self.mhc.hc_ffn_pre, self.post_attention_layernorm
         )
+        if self.mlp_scattered:
+            tokens = hidden_states.shape[0]
+            if tokens % self.attn_tp_size:
+                raise ValueError("GLM MoE input tokens must be padded to attention TP")
+            chunk = tokens // self.attn_tp_size
+            hidden_states = hidden_states.narrow(0, self.attn_tp_rank * chunk, chunk)
+        elif self.attn_dp_size > 1:
+            gathered = get_global_dp_buffer()
+            # Disjoint DP slices use all-reduce for either padding mode.
+            # This avoids a reduce-scatter/all-gather pair for MAX_LEN.
+            _dp_gather_via_all_reduce(
+                gathered, hidden_states, forward_batch, is_partial=False
+            )
+            hidden_states = gathered
+        return hidden_states, residual
 
     def postprocess_layer(self, hidden_states, residual, forward_batch):
-        del forward_batch
+        if self.mlp_scattered and self.attn_tp_size > 1:
+            # Every rank in this attention group has the same local length,
+            # including an entirely idle group during another DP's prefill.
+            if residual.shape[0]:
+                gathered = hidden_states.new_zeros(
+                    (residual.shape[0], hidden_states.shape[-1])
+                )
+                chunk = hidden_states.shape[0]
+                gathered.narrow(0, self.attn_tp_rank * chunk, chunk).copy_(
+                    hidden_states
+                )
+                # Each output element has only one contributing rank;
+                # summing the disjoint slices reconstructs the token batch.
+                hidden_states = attention_tensor_model_parallel_all_reduce(gathered)
+        elif not self.mlp_scattered and self.attn_dp_size > 1:
+            local = hidden_states.new_empty(
+                (residual.shape[0], hidden_states.shape[-1])
+            )
+            dp_scatter(local, hidden_states, forward_batch)
+            hidden_states = local
         hidden_states = self.mhc.combine(hidden_states, residual)
         self.mhc.h_res = self.mhc.h_post = None
         if self.is_last_layer:

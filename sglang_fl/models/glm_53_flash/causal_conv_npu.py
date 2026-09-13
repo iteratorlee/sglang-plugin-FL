@@ -22,9 +22,9 @@ def _glm_causal_conv_step(
         )
         x = tl.load(X + token * DIM + d, d < DIM, 0)
         values = tl.where(k[None, :] < 3, history, x[:, None])
-        weight = tl.load(
-            WEIGHT + d[:, None] * 4 + k[None, :], d[:, None] < DIM, 0
-        ).to(tl.float32)
+        weight = tl.load(WEIGHT + d[:, None] * 4 + k[None, :], d[:, None] < DIM, 0).to(
+            tl.float32
+        )
         products = values.to(tl.float32) * weight
         a0 = tl.sum(tl.where(k[None, :] == 0, products, 0), 1)
         a1 = tl.sum(tl.where(k[None, :] == 1, products, 0), 1)
@@ -46,7 +46,7 @@ def _glm_causal_conv_step(
 
 
 def supports_causal_conv_step(x, state, weight, bias, indices):
-    """Restrict the fast path to the tested TP16 layout and one token/slot."""
+    """Restrict the fast path to the tested attention-TP layouts and one token/slot."""
     return (
         bias is None
         and x.device.type == "npu"
@@ -55,10 +55,10 @@ def supports_causal_conv_step(x, state, weight, bias, indices):
         and weight.dtype in (torch.float32, torch.bfloat16)
         and indices.dtype == torch.int32
         and x.ndim == 2
-        and x.shape[1] == 1536
+        and x.shape[1] in (768, 1536, 3072, 6144)
         and state.ndim == 3
-        and state.shape[1:] == (1536, 3)
-        and weight.shape == (1536, 4)
+        and state.shape[1:] == (x.shape[1], 3)
+        and weight.shape == (x.shape[1], 4)
         and indices.shape == (x.shape[0],)
         and all(t.is_contiguous() for t in (x, state, weight, indices))
     )
