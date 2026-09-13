@@ -760,7 +760,7 @@ class Glm5NextDecoderLayer(nn.Module):
         self.mla_enable_prefill_cp = mla_enable_prefill_cp
         self.layer_id = layer_id
         self.is_nextn = is_nextn
-        self.is_linear_attn = config.is_kda_layer(layer_id)
+        self.is_linear_attn = not is_nextn and config.is_kda_layer(layer_id)
 
         if self.is_linear_attn:
             self.self_attn = Glm5NextLinearAttention(
@@ -1033,9 +1033,10 @@ class Glm5NextDecoderLayer(nn.Module):
                 hidden_states, forward_batch, get_parallel().attn_cp_size
             )
 
-        self.layer_communicator.maybe_prefetch_next_full_attention_kv(
-            forward_batch, next_full_attention_layer_id
-        )
+        if next_full_attention_layer_id is not None:
+            self.layer_communicator.maybe_prefetch_next_full_attention_kv(
+                forward_batch, next_full_attention_layer_id
+            )
 
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states,
@@ -1368,7 +1369,6 @@ class Glm5NextForConditionalGeneration(nn.Module):
         self.pp_group = get_pp_group()
         self.config = text_config
         from .deepep_tuning import configure_small_batch_capacity
-
         configure_small_batch_capacity(get_global_server_args(), get_parallel().attn_tp_size)
         self.tp_size = get_parallel().tp_size
         self.quant_config = quant_config
@@ -1821,7 +1821,7 @@ class Glm5NextForConditionalGeneration(nn.Module):
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
 
-        if qc is not None and qc.get_name() == "modelslim" and not is_nextn:
+        if qc is not None and qc.get_name() == "modelslim":
             # ModelSlim can rename modules independently of the BF16 export.
             # Never let a missing attention/mHC/quantization parameter silently
             # survive as torch.empty. RMSNorm anti-bias is initialized to zero
@@ -1829,7 +1829,10 @@ class Glm5NextForConditionalGeneration(nn.Module):
             missing = sorted(
                 name
                 for name in params_dict.keys() - loaded_params
-                if name.startswith("model.layers.") and not name.endswith(".bias")
+                if (name.startswith("model.layers.") or
+                    (is_nextn and name.startswith(("model.decoder.", "model.eh_proj.",
+                        "model.enorm.", "model.hnorm.", "model.shared_head.norm."))))
+                and not name.endswith(".bias")
             )
             if missing:
                 raise ValueError(f"Unloaded GLM ModelSlim parameters: {missing}")

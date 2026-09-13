@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+from copy import copy
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -240,6 +242,17 @@ class IndexerKPool(Indexer):
             persistent=False,
         )
 
+        steps = get_global_server_args().speculative_num_draft_tokens
+        if steps is not None:
+            graph_bs = getattr(get_global_server_args(), "cuda_graph_bs", None) or [1]
+            scratch_requests = max(num_req_slots, max(graph_bs) + 1)
+            self.register_buffer("_kpool_mtp_tail_k", torch.zeros(
+                scratch_requests, steps, self.index_kpool, self.head_dim,
+                dtype=torch.bfloat16, device=device), persistent=False)
+            self.register_buffer("_kpool_mtp_tail_score", torch.zeros(
+                scratch_requests, steps, self.index_kpool, self.head_dim,
+                dtype=torch.float32, device=device), persistent=False)
+
     def _bind_ascend_forward(self) -> None:
         # torch_npu makes the v0.5.11 module-level CUDA probe true as well as
         # the NPU probe; MultiPlatformOp checks CUDA first.  This model-owned
@@ -352,7 +365,7 @@ class IndexerKPool(Indexer):
     ) -> list[torch.Tensor]:
         compressed_by_request: list[torch.Tensor] = []
         offset = 0
-        for i in range(forward_batch.batch_size):
+        for i in range(getattr(forward_batch, "_original_batch_size", forward_batch.batch_size)):
             q_len = int(forward_batch.extend_seq_lens_cpu[i])
             seq_len = int(forward_batch.seq_lens_cpu[i])
             first_pos = seq_len - q_len
@@ -426,7 +439,7 @@ class IndexerKPool(Indexer):
         pooled_topk = self.index_topk // self.index_kpool
         result = []
         offset = 0
-        for i in range(forward_batch.batch_size):
+        for i in range(getattr(forward_batch, "_original_batch_size", forward_batch.batch_size)):
             q_len = int(forward_batch.extend_seq_lens_cpu[i])
             seq_len = int(forward_batch.seq_lens_cpu[i])
             first_pos = seq_len - q_len
@@ -581,6 +594,35 @@ class IndexerKPool(Indexer):
         )
         return self._expand_with_tail(topk.squeeze(1), positions[:bs])
 
+    def _verify_topk(self, q, key, weights, gate_score, positions,
+                     forward_batch, block_tables, layer_id):
+        steps = forward_batch.spec_info.draft_token_num
+        bs = getattr(forward_batch, "_original_batch_size", forward_batch.batch_size)
+        real_shape_tokens = bs * steps
+        metadata = _get_full_attn_metadata(forward_batch)
+        step_batch = copy(forward_batch)
+        step_batch.batch_size = bs
+        step_batch.req_pool_indices = forward_batch.req_pool_indices[:bs]
+        block_tables = block_tables[:bs]
+        outputs = []
+        req = forward_batch.req_pool_indices[:bs].long()
+        for step in range(steps):
+            rows = slice(step, real_shape_tokens, steps)
+            step_positions = positions[rows].contiguous()
+            step_metadata = copy(metadata)
+            step_metadata.seq_lens = torch.where(req > 0, step_positions + 1, 0).int()
+            step_batch.attn_backend = SimpleNamespace(forward_metadata=step_metadata)
+            result = self._decode_topk(q[rows].contiguous(), key[rows].contiguous(),
+                weights[rows].contiguous(), gate_score[rows].contiguous(),
+                step_positions, step_batch, block_tables, layer_id)
+            outputs.append(result)
+            self._kpool_mtp_tail_k[:bs, step].copy_(self._kpool_tail_k.index_select(0, req))
+            self._kpool_mtp_tail_score[:bs, step].copy_(self._kpool_tail_score.index_select(0, req))
+        result = torch.stack(outputs, 1).flatten(0, 1)
+        if q.shape[0] > real_shape_tokens:
+            result = torch.cat((result, result.new_zeros(q.shape[0]-real_shape_tokens, result.shape[1])), 0)
+        return result
+
     def forward_npu(
         self,
         x: torch.Tensor,
@@ -611,7 +653,10 @@ class IndexerKPool(Indexer):
         ).float()
         block_tables = _get_full_attn_metadata(forward_batch).block_tables
 
-        if forward_batch.forward_mode.is_extend():
+        if forward_batch.forward_mode.is_target_verify():
+            indices = self._verify_topk(q, key, weights, gate_score, positions,
+                forward_batch, block_tables, layer_id)
+        elif forward_batch.forward_mode.is_extend():
             compressed = self._store_prefill_pools(
                 key, gate_score, forward_batch, block_tables, layer_id
             )

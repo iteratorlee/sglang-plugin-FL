@@ -57,7 +57,7 @@ def get_forward():
 def is_deepseek_dsa(config) -> bool:
     archs = getattr(config, "architectures", None) or []
     return (
-        "Glm5NextForConditionalGeneration" in archs
+        any(a in ("Glm5NextForConditionalGeneration", "Glm5NextForConditionalGenerationNextN") for a in archs)
         and getattr(config, "index_topk", None) is not None
     )
 

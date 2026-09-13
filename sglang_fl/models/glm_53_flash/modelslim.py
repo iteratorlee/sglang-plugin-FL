@@ -54,6 +54,9 @@ class _GlmW8A8MoEScheme(ModelSlimW8A8Int8MoE):
     def __init__(self, quant_config):
         super().__init__(quant_config)
         self.kernel = GlmW8A8MoEMethod()
+        if getattr(quant_config, "glm53_is_mtp", False):
+            self.kernel._audited_shapes = set()
+            self.kernel._audit_role = "mtp"
 
 
 class GlmW8A8MoEMethod(NPUW8A8Int8DynamicMoEMethod):
@@ -147,6 +150,7 @@ class GlmW8A8MoEMethod(NPUW8A8Int8DynamicMoEMethod):
                         json.dumps(
                             {
                                 "source": __file__,
+                                "model_role": getattr(self, "_audit_role", "target"),
                                 "input_shape": shape,
                                 "input_dtype": str(hidden_states.dtype),
                                 "dispatch_dtype": dispatch_dtype,

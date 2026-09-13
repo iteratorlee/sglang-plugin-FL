@@ -33,6 +33,9 @@ def _glm_kda_varlen_recurrent_kernel(
     cu_seqlens,
     scale,
     lower_bound,
+    intermediate,
+    STEPS: tl.constexpr,
+    SAVE_INTERMEDIATE: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -98,6 +101,10 @@ def _glm_kda_varlen_recurrent_kernel(
             b_v -= tl.sum(b_h * b_k[:, None], axis=0)
             b_v *= b_beta
             b_h += b_k[:, None] * b_v[None, :]
+            if SAVE_INTERMEDIATE:
+                p_mid = (intermediate + ((i_n * STEPS + i) * HV + i_hv) * K * V
+                         + o_k[:, None] * V + o_v[None, :])
+                tl.store(p_mid, b_h, mask=mask_h & (state_index > 0))
             b_o = tl.sum(b_h * b_q[:, None], axis=0)
             tl.store(
                 p_o + i * HV * V,
@@ -105,7 +112,7 @@ def _glm_kda_varlen_recurrent_kernel(
                 mask=mask_v,
             )
 
-        if state_index > 0:
+        if not SAVE_INTERMEDIATE and state_index > 0:
             tl.store(
                 p_h0,
                 b_h.to(p_h0.dtype.element_ty),
@@ -128,6 +135,7 @@ def glm_kda_varlen_recurrent_npu(
     cu_seqlens: torch.Tensor,
     lower_bound: Optional[float],
     scale: Optional[float] = None,
+    intermediate_state: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Run a packed varlen KDA prefill and update each request state once."""
 
@@ -164,6 +172,12 @@ def glm_kda_varlen_recurrent_npu(
     if scale is None:
         scale = key_dim**-0.5
 
+    if intermediate_state is not None:
+        if (intermediate_state.ndim != 5 or not intermediate_state.is_contiguous()
+            or intermediate_state.shape[0] < initial_state_indices.numel()
+            or intermediate_state.shape[2:] != (num_value_heads, key_dim, value_dim)
+            or intermediate_state.dtype != initial_state_source.dtype):
+            raise ValueError("Invalid GLM KDA per-token intermediate state layout")
     output = torch.zeros_like(v)
     block_value_count = triton.cdiv(value_dim, block_v)
     heads_per_program = 2
@@ -186,6 +200,9 @@ def glm_kda_varlen_recurrent_npu(
         cu_seqlens=cu_seqlens,
         scale=scale,
         lower_bound=lower_bound,
+        intermediate=intermediate_state if intermediate_state is not None else initial_state_source,
+        STEPS=intermediate_state.shape[1] if intermediate_state is not None else 0,
+        SAVE_INTERMEDIATE=intermediate_state is not None,
         H=num_q_heads,
         HV=num_value_heads,
         K=key_dim,

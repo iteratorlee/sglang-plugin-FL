@@ -50,7 +50,7 @@ def register_glm5_next() -> None:
             LinearAttnModelSpec(
                 config_class=Glm5NextTextConfig,
                 backend_class_name=f"{__package__}.ascend_kda.AscendKDAAttnBackend",
-                arch_names=["Glm5NextForConditionalGeneration"],
+                arch_names=["Glm5NextForConditionalGeneration", "Glm5NextForConditionalGenerationNextN"],
                 uses_mamba_radix_cache=True,
                 support_mamba_cache=True,
                 support_mamba_cache_extra_buffer=False,
@@ -78,7 +78,7 @@ def patch_deepseek_dsa_compat() -> None:
     def _is_sparse(config):
         archs = getattr(config, "architectures", None) or []
         return (
-            "Glm5NextForConditionalGeneration" in archs
+            any(a in ("Glm5NextForConditionalGeneration", "Glm5NextForConditionalGenerationNextN") for a in archs)
             and getattr(config, "index_topk", None) is not None
         )
 
@@ -99,7 +99,7 @@ def patch_deepseek_dsa_compat() -> None:
         """
 
         architectures = getattr(config, "architectures", None) or []
-        if "Glm5NextForConditionalGeneration" in architectures:
+        if any(a in ("Glm5NextForConditionalGeneration", "Glm5NextForConditionalGenerationNextN") for a in architectures):
             return False
         return _is_nsa(config)
 
@@ -169,7 +169,7 @@ def patch_glm5_pool_context() -> None:
         )
         index_head_dim = (
             int(self.model_config.hf_text_config.index_head_dim)
-            if "Glm5NextForConditionalGeneration" in architectures
+            if any(a in ("Glm5NextForConditionalGeneration", "Glm5NextForConditionalGenerationNextN") for a in architectures)
             else None
         )
         token = _GLM_POOL_INDEX_HEAD_DIM.set(index_head_dim)
@@ -353,6 +353,11 @@ def patch_npu_mla_zero_rope_sparse() -> None:
         # k_rope.  Scope the physical ABI width to this call and restore the
         # logical zero width even if the NPU operator raises.
         self.qk_rope_head_dim = physical_dim
+        original_query_lengths = self.forward_metadata.actual_seq_lengths_q
+        if forward_batch.forward_mode.is_draft_extend() and original_query_lengths is None:
+            bs = getattr(forward_batch, "_original_batch_size", forward_batch.batch_size)
+            self.forward_metadata.actual_seq_lengths_q = (
+                forward_batch.extend_seq_lens[:bs].cumsum(dim=0).to(device=q.device).int())
         try:
             return original(
                 self,
@@ -368,6 +373,7 @@ def patch_npu_mla_zero_rope_sparse() -> None:
             )
         finally:
             self.qk_rope_head_dim = 0
+            self.forward_metadata.actual_seq_lengths_q = original_query_lengths
 
     AscendAttnBackend.forward_sparse = _forward_sparse
 
@@ -397,4 +403,7 @@ def apply_glm5_patches() -> None:
     from .small_graph import patch_small_graphs
 
     patch_small_graphs()
+    from .mtp_compat import patch_mtp
+
+    patch_mtp()
     register_glm5_processor()

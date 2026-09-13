@@ -213,15 +213,10 @@ class AscendKDAAttnBackend(KDAAttnBackend):
     """KDA backend with legal NPU graph-padding cache indices."""
 
     def __init__(self, model_runner):
-        # This compatibility layer intentionally covers ordinary prefill and
-        # decode only.  The optional Ascend speculative-Mamba implementation
-        # is not present in the v0.5.11 image and must not be advertised as a
-        # silently degraded path.
         if not model_runner.spec_algorithm.is_none():
-            raise NotImplementedError(
-                "GLM-5.3 Ascend KDA on v0.5.11 does not support speculative "
-                "decoding or DFlash"
-            )
+            args = model_runner.server_args
+            if args.speculative_algorithm != "EAGLE" or args.speculative_eagle_topk != 1:
+                raise NotImplementedError("GLM-5.3 MTP currently requires EAGLE top-k one")
         server_args = model_runner.server_args
         if not server_args.disable_radix_cache:
             raise ValueError(
@@ -236,6 +231,20 @@ class AscendKDAAttnBackend(KDAAttnBackend):
                 "across scheduler chunks"
             )
         super().__init__(model_runner)
+
+    def _forward_metadata(self, forward_batch):
+        metadata = super()._forward_metadata(forward_batch)
+        if forward_batch.forward_mode.is_target_verify():
+            # Eager TP pads input_ids, but those extra tokens are not requests.
+            # The generic backend incorrectly creates a sequence for each
+            # padded draft block; retain only the actual request batch here.
+            steps = forward_batch.spec_info.draft_token_num
+            bs = getattr(forward_batch, "_original_batch_size", forward_batch.batch_size)
+            metadata.mamba_cache_indices = metadata.mamba_cache_indices[:bs]
+            metadata.query_start_loc = torch.arange(
+                0, (bs + 1) * steps, steps,
+                dtype=torch.int32, device=forward_batch.input_ids.device)
+        return metadata
 
     def forward_decode(
         self,
@@ -304,6 +313,8 @@ class AscendKDAAttnBackend(KDAAttnBackend):
         b: torch.Tensor,
         **kwargs,
     ):
+        if forward_batch.forward_mode.is_target_verify():
+            return self.forward_verify(layer, forward_batch, mixed_qkv, a, b)
         cache_indices = self.forward_metadata.mamba_cache_indices
         layer_cache = self.req_to_token_pool.mamba2_layer_cache(layer.layer_id)
         conv_states = _physical_npu_conv_state(
@@ -356,6 +367,31 @@ class AscendKDAAttnBackend(KDAAttnBackend):
             lower_bound=getattr(layer, "lower_bound", None),
         )
 
+    def forward_verify(self, layer, forward_batch, mixed_qkv, a, b):
+        from .mtp_state_npu import conv_verify
+        from .kda_recurrent_npu import glm_kda_varlen_recurrent_npu
+        self.verify_req_pool_indices = forward_batch.req_pool_indices
+        cache = self.req_to_token_pool.mamba2_layer_cache(layer.layer_id)
+        indices = self.forward_metadata.mamba_cache_indices
+        starts = self.forward_metadata.query_start_loc
+        steps = forward_batch.spec_info.draft_token_num
+        if layer.bias is not None or steps != cache.intermediate_ssm.shape[1]:
+            raise ValueError("Unsupported GLM MTP verification layout")
+        conv = _physical_npu_conv_state(cache.conv[0], layer.conv_weights.shape[-1])
+        mid = cache.intermediate_conv_window[0]
+        mid = mid.view(mid.shape[0], steps, conv.shape[1], conv.shape[2])
+        qkv = conv_verify(mixed_qkv, conv, layer.conv_weights, indices, starts, mid)
+        q, k, v = [t.contiguous() for t in qkv.split([layer.q_dim, layer.k_dim, layer.v_dim], -1)]
+        q = q.unflatten(-1, (-1, layer.head_q_dim)).unsqueeze(0)
+        k = k.unflatten(-1, (-1, layer.head_k_dim)).unsqueeze(0)
+        v = v.unflatten(-1, (-1, layer.head_v_dim)).unsqueeze(0)
+        return glm_kda_varlen_recurrent_npu(A_log=layer.A_log,
+            a=a.reshape(1, q.shape[1], v.shape[2], k.shape[3]),
+            b=b.reshape(1, q.shape[1], v.shape[2]), dt_bias=layer.dt_bias,
+            q=q, k=k, v=v, initial_state_source=cache.temporal,
+            initial_state_indices=indices, cu_seqlens=starts,
+            lower_bound=layer.lower_bound, intermediate_state=cache.intermediate_ssm)
+
     def get_cuda_graph_seq_len_fill_value(self):
         return 0
 
@@ -367,6 +403,8 @@ class AscendKDAAttnBackend(KDAAttnBackend):
         spec_info: Optional[SpecInput],
         seq_lens_cpu: Optional[torch.Tensor],
     ):
+        if forward_mode.is_target_verify():
+            self.verify_req_pool_indices = req_pool_indices
         metadata = super()._replay_metadata(
             bs, req_pool_indices, forward_mode, spec_info, seq_lens_cpu
         )
