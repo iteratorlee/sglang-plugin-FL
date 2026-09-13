@@ -251,23 +251,32 @@ class AscendKDAAttnBackend(KDAAttnBackend):
         )
         cache_indices = self.forward_metadata.mamba_cache_indices
 
-        # Supplying num_accepted_tokens selects sgl_kernel_npu's Triton update
-        # path.  The fallback uses advanced indexing whose capture-time cache
-        # indices can be baked into an NPU graph.  Slot 0 is graph padding and
-        # is explicitly skipped by the Triton kernel.
-        num_accepted_tokens = torch.ones(
-            (mixed_qkv.shape[0],), dtype=torch.int32, device=mixed_qkv.device
-        )
-        qkv = causal_conv1d_update(
-            mixed_qkv,
-            conv_states,
-            layer.conv_weights,
-            layer.bias,
-            activation="silu",
-            conv_state_indices=cache_indices,
-            num_accepted_tokens=num_accepted_tokens,
-            pad_slot_id=0,
-        )
+        from .causal_conv_npu import causal_conv_step, supports_causal_conv_step
+
+        if supports_causal_conv_step(
+            mixed_qkv, conv_states, layer.conv_weights, layer.bias, cache_indices
+        ):
+            qkv = causal_conv_step(
+                mixed_qkv, conv_states, layer.conv_weights, cache_indices
+            )
+        else:
+            # Supplying num_accepted_tokens selects sgl_kernel_npu's Triton update
+            # path.  The fallback uses advanced indexing whose capture-time cache
+            # indices can be baked into an NPU graph.  Slot 0 is graph padding and
+            # is explicitly skipped by the Triton kernel.
+            num_accepted_tokens = torch.ones(
+                (mixed_qkv.shape[0],), dtype=torch.int32, device=mixed_qkv.device
+            )
+            qkv = causal_conv1d_update(
+                mixed_qkv,
+                conv_states,
+                layer.conv_weights,
+                layer.bias,
+                activation="silu",
+                conv_state_indices=cache_indices,
+                num_accepted_tokens=num_accepted_tokens,
+                pad_slot_id=0,
+            )
         q, k, v = qkv.split([layer.q_dim, layer.k_dim, layer.v_dim], dim=-1)
         q = q.unflatten(-1, (-1, layer.head_q_dim)).unsqueeze(0)
         k = k.unflatten(-1, (-1, layer.head_k_dim)).unsqueeze(0)
