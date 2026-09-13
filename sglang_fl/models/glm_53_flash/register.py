@@ -403,6 +403,8 @@ def apply_glm5_patches() -> None:
     from .small_graph import patch_small_graphs
 
     patch_small_graphs()
+    from .hccl_tuning import patch_hccl_options
+    patch_hccl_options()
     from .normal_collective import patch_normal_collectives
     patch_normal_collectives()
     from .mtp_compat import patch_mtp
