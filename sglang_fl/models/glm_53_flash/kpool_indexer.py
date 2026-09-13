@@ -513,14 +513,11 @@ class IndexerKPool(Indexer):
         bs = q.shape[0]
         raw_req = forward_batch.req_pool_indices[:bs].to(torch.long)
         token_rows = torch.arange(bs, device=q.device, dtype=torch.long)
-        num_valid = getattr(forward_batch, "num_token_non_padded", None)
-        valid_req = raw_req >= 0
-        if num_valid is not None:
-            # Graph padding copies only raw_bs request ids; remaining entries
-            # retain the capture-time zero.  num_token_non_padded is the
-            # replay-updated device scalar and is therefore the authoritative
-            # dynamic validity mask.
-            valid_req = valid_req & (token_rows < num_valid.to(torch.long))
+        metadata = _get_full_attn_metadata(forward_batch)
+        seq_lens = metadata.seq_lens[:bs].to(torch.int32)
+        # num_token_non_padded is local to the MoE token shard under EP.
+        # Every attention TP rank still owns the complete request batch.
+        valid_req = (raw_req > 0) & (seq_lens > 0)
         req = torch.where(
             valid_req,
             raw_req,
@@ -556,8 +553,6 @@ class IndexerKPool(Indexer):
             compressed,
         )
 
-        metadata = _get_full_attn_metadata(forward_batch)
-        seq_lens = metadata.seq_lens[:bs].to(torch.int32)
         pool_lens = torch.div(seq_lens, self.index_kpool, rounding_mode="floor").to(
             torch.int32
         )
