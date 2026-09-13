@@ -108,10 +108,16 @@ class MHCLayerCommunicator:
         )
         if self.mlp_scattered:
             tokens = hidden_states.shape[0]
-            if tokens % self.attn_tp_size:
-                raise ValueError("GLM MoE input tokens must be padded to attention TP")
-            chunk = tokens // self.attn_tp_size
-            hidden_states = hidden_states.narrow(0, self.attn_tp_rank * chunk, chunk)
+            chunk = (tokens + self.attn_tp_size - 1) // self.attn_tp_size
+            start = self.attn_tp_rank * chunk
+            valid = max(0, min(chunk, tokens - start))
+            if valid == chunk:
+                hidden_states = hidden_states.narrow(0, start, chunk)
+            else:
+                padded = hidden_states.new_zeros((chunk, hidden_states.shape[-1]))
+                if valid:
+                    padded[:valid].copy_(hidden_states.narrow(0, start, valid))
+                hidden_states = padded
         elif self.attn_dp_size > 1:
             gathered = get_global_dp_buffer()
             # Disjoint DP slices use all-reduce for either padding mode.
@@ -127,16 +133,18 @@ class MHCLayerCommunicator:
             # Every rank in this attention group has the same local length,
             # including an entirely idle group during another DP's prefill.
             if residual.shape[0]:
-                gathered = hidden_states.new_zeros(
-                    (residual.shape[0], hidden_states.shape[-1])
-                )
                 chunk = hidden_states.shape[0]
+                gathered = hidden_states.new_zeros(
+                    (chunk * self.attn_tp_size, hidden_states.shape[-1])
+                )
                 gathered.narrow(0, self.attn_tp_rank * chunk, chunk).copy_(
                     hidden_states
                 )
                 # Each output element has only one contributing rank;
                 # summing the disjoint slices reconstructs the token batch.
-                hidden_states = attention_tensor_model_parallel_all_reduce(gathered)
+                hidden_states = attention_tensor_model_parallel_all_reduce(gathered)[
+                    : residual.shape[0]
+                ]
         elif not self.mlp_scattered and self.attn_dp_size > 1:
             local = hidden_states.new_empty(
                 (residual.shape[0], hidden_states.shape[-1])

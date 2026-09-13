@@ -108,9 +108,7 @@ def patch_deepseek_dsa_compat() -> None:
     if not hasattr(patch_deepseek_dsa_compat, "_original_is_nsa"):
         patch_deepseek_dsa_compat._original_is_nsa = model_config_utils.is_deepseek_nsa
     patch_deepseek_dsa_compat._is_nsa = _is_nsa
-    patch_deepseek_dsa_compat._is_nsa_for_pool_selection = (
-        _is_nsa_for_pool_selection
-    )
+    patch_deepseek_dsa_compat._is_nsa_for_pool_selection = _is_nsa_for_pool_selection
     model_config_utils.is_deepseek_nsa = _is_nsa
     model_config_utils.get_nsa_index_head_dim = lambda config: config.index_head_dim
     model_config_utils.get_nsa_index_n_heads = lambda config: config.index_n_heads
@@ -119,7 +117,6 @@ def patch_deepseek_dsa_compat() -> None:
     dsv2.get_nsa_index_head_dim = lambda config: config.index_head_dim
     dsv2.get_nsa_index_n_heads = lambda config: config.index_n_heads
     dsv2.get_nsa_index_topk = lambda config: config.index_topk
-
 
     # A few v0.5.11 modules bind the helper at import time.  Update only that
     # bound symbol; the wrapper delegates all non-GLM configs to the original.
@@ -177,9 +174,7 @@ def patch_glm5_pool_context() -> None:
         )
         token = _GLM_POOL_INDEX_HEAD_DIM.set(index_head_dim)
         try:
-            result = patch_glm5_pool_context._original_init_pools(
-                self, *args, **kwargs
-            )
+            result = patch_glm5_pool_context._original_init_pools(self, *args, **kwargs)
             if index_head_dim is not None:
                 pool = self.token_to_kv_pool
                 full_pool = getattr(pool, "full_kv_pool", None)
@@ -333,9 +328,8 @@ def patch_npu_mla_zero_rope_sparse() -> None:
     ):
         pool = forward_batch.token_to_kv_pool
         full_pool = getattr(pool, "full_kv_pool", pool)
-        is_glm_zero_rope = (
-            self.qk_rope_head_dim == 0
-            and getattr(full_pool, "_sglang_fl_zero_rope", False)
+        is_glm_zero_rope = self.qk_rope_head_dim == 0 and getattr(
+            full_pool, "_sglang_fl_zero_rope", False
         )
         if not is_glm_zero_rope:
             return original(
@@ -400,4 +394,7 @@ def apply_glm5_patches() -> None:
     patch_npu_mla_zero_rope_cache()
     patch_npu_mla_zero_rope_prepare()
     patch_npu_mla_zero_rope_sparse()
+    from .small_graph import patch_small_graphs
+
+    patch_small_graphs()
     register_glm5_processor()

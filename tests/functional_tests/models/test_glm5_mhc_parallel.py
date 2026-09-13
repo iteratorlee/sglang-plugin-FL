@@ -7,7 +7,7 @@ import torch
 
 @pytest.mark.parametrize("tp_size,dp_size", [(16, 1), (4, 4), (4, 8)])
 @pytest.mark.parametrize("scattered", [True, False])
-@pytest.mark.parametrize("tokens", [0, 16])
+@pytest.mark.parametrize("tokens", [0, 1, 2, 4, 16])
 def test_mhc_parallel_boundaries(monkeypatch, tp_size, dp_size, scattered, tokens):
     from sglang_fl.models.glm_53_flash import mhc_communicator as mod
 
@@ -15,6 +15,9 @@ def test_mhc_parallel_boundaries(monkeypatch, tp_size, dp_size, scattered, token
     local = torch.arange(tokens * hidden, dtype=torch.float32).reshape(tokens, hidden)
     residual = torch.zeros(tokens, 4 * hidden)
     local_mlp = local * 3 + 7
+    chunk = (tokens + tp_size - 1) // tp_size
+    padded_mlp = torch.zeros(chunk * tp_size, hidden)
+    padded_mlp[:tokens] = local_mlp
     global_mlp = torch.cat([local_mlp + 1000 * r for r in range(dp_size)], dim=0)
     for rank in range(tp_size):
         calls = []
@@ -27,13 +30,12 @@ def test_mhc_parallel_boundaries(monkeypatch, tp_size, dp_size, scattered, token
                 calls.append("attention_reduce")
                 return x * tp_size
             calls.append("tp_gather")
-            chunk = tokens // tp_size
-            shard = torch.zeros_like(local_mlp)
-            shard[rank * chunk : (rank + 1) * chunk] = local_mlp[
+            shard = torch.zeros_like(padded_mlp)
+            shard[rank * chunk : (rank + 1) * chunk] = padded_mlp[
                 rank * chunk : (rank + 1) * chunk
             ]
             torch.testing.assert_close(x, shard)
-            return local_mlp.clone()
+            return padded_mlp.clone()
 
         monkeypatch.setattr(
             mod, "attention_tensor_model_parallel_all_reduce", all_reduce
@@ -53,7 +55,6 @@ def test_mhc_parallel_boundaries(monkeypatch, tp_size, dp_size, scattered, token
 
         def gather_tp(out, x):
             calls.append("tp_gather")
-            chunk = tokens // tp_size
             torch.testing.assert_close(x, local_mlp[rank * chunk : (rank + 1) * chunk])
             out.copy_(local_mlp)
 
@@ -92,9 +93,8 @@ def test_mhc_parallel_boundaries(monkeypatch, tp_size, dp_size, scattered, token
         mlp_input, r = comm.prepare_mlp(local.clone(), residual, SimpleNamespace())
         assert r is residual
         if scattered:
-            chunk = tokens // tp_size
             torch.testing.assert_close(
-                mlp_input, local_mlp[rank * chunk : (rank + 1) * chunk]
+                mlp_input, padded_mlp[rank * chunk : (rank + 1) * chunk]
             )
             output, _ = comm.postprocess_layer(mlp_input, residual, SimpleNamespace())
         else:
