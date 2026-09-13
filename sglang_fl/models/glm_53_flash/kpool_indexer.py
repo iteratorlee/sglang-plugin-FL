@@ -698,15 +698,19 @@ class IndexerKPool(Indexer):
                 q, weights, compressed, forward_batch, positions
             )
         else:
+            if getattr(self, '_glm53_draft_decode', False):
+                # Each draft step advances positions. Match the compressed
+                # causal prefix to those positions even when backend metadata
+                # retains the target's pre-draft sequence length.
+                metadata = copy(_get_full_attn_metadata(forward_batch))
+                bs = forward_batch.batch_size
+                valid = (forward_batch.req_pool_indices[:bs] > 0) & (metadata.seq_lens[:bs] > 0)
+                metadata.seq_lens = torch.where(valid, positions[:bs] + 1, 0).int()
+                forward_batch = copy(forward_batch)
+                forward_batch.attn_backend = SimpleNamespace(forward_metadata=metadata)
             indices = self._decode_topk(
-                q,
-                key,
-                weights,
-                gate_score,
-                positions,
-                forward_batch,
-                block_tables,
-                layer_id,
+                q, key, weights, gate_score, positions,
+                forward_batch, block_tables, layer_id,
             )
         return _as_ascend_sparse_indices(indices)
 
