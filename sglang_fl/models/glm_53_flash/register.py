@@ -403,6 +403,8 @@ def apply_glm5_patches() -> None:
     from .small_graph import patch_small_graphs
 
     patch_small_graphs()
+    from .normal_sync import patch_normal_dispatch_sync
+    patch_normal_dispatch_sync()
     from .mtp_compat import patch_mtp
 
     patch_mtp()
