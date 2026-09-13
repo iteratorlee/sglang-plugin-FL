@@ -25,7 +25,8 @@ def patch_draft_extend_graph():
         args = self.server_args
         enabled = (os.getenv('SGLANG_FL_GLM53_MTP_EXTEND_GRAPH') == '1'
             and str(self.device).split(':')[0] == 'npu'
-            and args.tp_size == args.ep_size == 16 and args.nnodes == 1
+            and args.tp_size == args.ep_size and args.tp_size in (16, 32)
+            and args.nnodes == args.tp_size // 16
             and isinstance(args.max_running_requests, int) and args.max_running_requests > 0
             and not args.disable_cuda_graph and not args.enable_dp_attention
             and args.speculative_eagle_topk == 1 and args.speculative_num_steps in (1,2,3,4)

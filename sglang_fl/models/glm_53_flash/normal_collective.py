@@ -62,8 +62,8 @@ def collective_combine(group, y, state):
 
 def enabled(args):
     return (os.getenv('SGLANG_FL_GLM53_NORMAL_HCCL')=='1'
-            and str(args.device).startswith('npu') and args.tp_size==args.ep_size==16
-            and args.nnodes==args.pp_size==1 and not args.enable_dp_attention
+            and str(args.device).startswith('npu') and args.tp_size==args.ep_size and args.tp_size in (16,32)
+            and args.nnodes==args.tp_size//16 and args.pp_size==1 and not args.enable_dp_attention
             and not args.enable_two_batch_overlap and not args.enable_eplb
             and args.ep_num_redundant_experts==0 and args.quantization=='modelslim'
             and _glm_checkpoint(args.model_path))
