@@ -412,4 +412,6 @@ def apply_glm5_patches() -> None:
     patch_mtp()
     from .compact_index import patch_compact_index
     patch_compact_index()
+    from .shared_zero_rope import patch_shared_zero_rope
+    patch_shared_zero_rope()
     register_glm5_processor()
