@@ -90,30 +90,71 @@ def _hc_post_apply(
 
 @triton.jit
 def _round_bf16_as_fp32(x):
-    bits=x.to(tl.uint32,bitcast=True)
-    rounded=(bits+0x7fff+((bits>>16)&1))&0xffff0000
+    bits = x.to(tl.uint32, bitcast=True)
+    rounded = (bits + 0x7FFF + ((bits >> 16) & 1)) & 0xFFFF0000
     # Preserve Inf; keep NaN a quiet NaN even if its payload is only low bits.
-    nonfinite=(bits&0x7f800000)==0x7f800000
-    payload=tl.where((bits&0x007fffff)!=0,bits|0x00400000,bits)&0xffff0000
-    result=tl.where(nonfinite,payload,rounded)
-    return result.to(tl.float32,bitcast=True)
+    nonfinite = (bits & 0x7F800000) == 0x7F800000
+    payload = tl.where((bits & 0x007FFFFF) != 0, bits | 0x00400000, bits) & 0xFFFF0000
+    result = tl.where(nonfinite, payload, rounded)
+    return result.to(tl.float32, bitcast=True)
 
 
 @triton.jit
 def _hc_pre_apply_norm(X, PRE, WEIGHT, OUT, H: tl.constexpr, EPS: tl.constexpr):
-    t=tl.program_id(0)
-    h=tl.arange(0,H)
-    r0=tl.load(X+t*4*H+h).to(tl.float32)
-    r1=tl.load(X+t*4*H+H+h).to(tl.float32)
-    r2=tl.load(X+t*4*H+2*H+h).to(tl.float32)
-    r3=tl.load(X+t*4*H+3*H+h).to(tl.float32)
-    p0=tl.load(PRE+t*4); p1=tl.load(PRE+t*4+1)
-    p2=tl.load(PRE+t*4+2); p3=tl.load(PRE+t*4+3)
-    mixed=(r0*p0+r2*p2)+(r1*p1+r3*p3)
-    narrow=_round_bf16_as_fp32(mixed)
-    inv=tl.rsqrt(tl.sum(narrow*narrow,0)/H+EPS)
-    w=tl.load(WEIGHT+h).to(tl.float32)
-    tl.store(OUT+t*H+h,(narrow*inv)*w)
+    t = tl.program_id(0)
+    h = tl.arange(0, H)
+    r0 = tl.load(X + t * 4 * H + h).to(tl.float32)
+    r1 = tl.load(X + t * 4 * H + H + h).to(tl.float32)
+    r2 = tl.load(X + t * 4 * H + 2 * H + h).to(tl.float32)
+    r3 = tl.load(X + t * 4 * H + 3 * H + h).to(tl.float32)
+    p0 = tl.load(PRE + t * 4)
+    p1 = tl.load(PRE + t * 4 + 1)
+    p2 = tl.load(PRE + t * 4 + 2)
+    p3 = tl.load(PRE + t * 4 + 3)
+    mixed = (r0 * p0 + r2 * p2) + (r1 * p1 + r3 * p3)
+    narrow = _round_bf16_as_fp32(mixed)
+    inv = tl.rsqrt(tl.sum(narrow * narrow, 0) / H + EPS)
+    w = tl.load(WEIGHT + h).to(tl.float32)
+    tl.store(OUT + t * H + h, (narrow * inv) * w)
+
+
+@triton.jit
+def _hc_projection_fp32(X, WEIGHT, OUT, K: tl.constexpr):
+    token = tl.program_id(0)
+    row = tl.program_id(1)
+    h = tl.arange(0, K)
+    x = tl.load(X + token * K + h).to(tl.float32)
+    weight = tl.load(WEIGHT + row * K + h)
+    value = tl.sum(x * weight, 0)
+    tl.store(OUT + token * 24 + row, value)
+
+
+def project_mhc(x, weight):
+    # The checkpoint stores this small mHC projection in FP32. Retain its
+    # full precision and avoid launching a general matrix multiplication
+    # for the small attention batch used by decode graphs.
+    if (
+        0 < x.shape[0] <= 16
+        and x.shape[1] == 16384
+        and x.dtype == torch.bfloat16
+        and x.device.type == "npu"
+        and x.is_contiguous()
+        and weight.shape == (24, 16384)
+        and weight.dtype == torch.float32
+        and weight.device == x.device
+        and weight.is_contiguous()
+    ):
+        output = torch.empty((x.shape[0], 24), device=x.device, dtype=torch.float32)
+        _hc_projection_fp32[(x.shape[0], 24)](
+            x,
+            weight,
+            output,
+            16384,
+            enable_fp_fusion=False,
+            enable_auto_bind_sub_block=False,
+        )
+        return output
+    return F.linear(x.float(), weight)
 
 
 def hc_pre(
@@ -148,7 +189,7 @@ def hc_pre(
     )
     if tokens:
         pre = torch.empty_like(post)
-        mixes = F.linear(x.float(), hc_fn)
+        mixes = project_mhc(x, hc_fn)
         _hc_coefficients[(tokens,)](
             x,
             mixes,
@@ -170,7 +211,12 @@ def hc_pre(
         )
         if fuse_norm:
             _hc_pre_apply_norm[(tokens,)](
-                x, pre, out_norm_weight, layer_input, hidden, out_norm_eps,
+                x,
+                pre,
+                out_norm_weight,
+                layer_input,
+                hidden,
+                out_norm_eps,
                 enable_fp_fusion=False,
                 enable_auto_bind_sub_block=False,
             )
