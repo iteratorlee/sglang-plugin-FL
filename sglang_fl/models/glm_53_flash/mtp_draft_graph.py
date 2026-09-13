@@ -1,9 +1,19 @@
 """Ascend graph for the checkpoint's single MTP block after target acceptance."""
 from functools import wraps
 import logging
+import math
 import os
 
 _PATCHED = False
+
+
+def capture_counts(max_requests, tp, draft_tokens):
+    """Cover scheduler capacity and make ordinary residual token shards whole."""
+    if max_requests < 1 or tp < 1 or draft_tokens < 2:
+        raise ValueError("positive request/TP counts and at least two draft tokens required")
+    unit = tp // math.gcd(tp, draft_tokens)
+    return ((max_requests + tp - 1) // tp * tp,
+            (max_requests + unit - 1) // unit * unit)
 
 def patch_draft_extend_graph():
     global _PATCHED
@@ -16,7 +26,7 @@ def patch_draft_extend_graph():
         enabled = (os.getenv('SGLANG_FL_GLM53_MTP_EXTEND_GRAPH') == '1'
             and str(self.device).split(':')[0] == 'npu'
             and args.tp_size == args.ep_size == 16 and args.nnodes == 1
-            and args.max_running_requests in (1, 2)
+            and isinstance(args.max_running_requests, int) and args.max_running_requests > 0
             and not args.disable_cuda_graph and not args.enable_dp_attention
             and args.speculative_eagle_topk == 1 and args.speculative_num_steps in (1,2,3,4)
             and type(self.draft_model_runner.model).__name__ == 'Glm5NextForConditionalGenerationNextN')
@@ -25,7 +35,9 @@ def patch_draft_extend_graph():
         from sglang.srt.speculative import eagle_draft_cuda_graph_runner as draft_mod
         previous_sizes = draft_mod.get_batch_sizes_to_capture
         def draft_sizes(runner, *args, **kwargs):
-            if runner is self.model_runner: return [args_tp], []
+            if runner is self.model_runner:
+                return [capture_counts(self.server_args.max_running_requests, args_tp,
+                                       self.speculative_num_steps + 1)[0]], []
             return previous_sizes(runner, *args, **kwargs)
         from sglang.srt.hardware_backend.npu.graph_runner import eagle_draft_npu_graph_runner as npu_mod
         from sglang.srt.configs.model_config import is_deepseek_nsa
@@ -84,13 +96,13 @@ def GlmDraftExtendGraph(worker):
 
     # The ordinary residual communicator requires a multiple of TP tokens.
     # Capture a padded request count whose token count is divisible by TP.
-    # Real request counts remain bounded by the scheduler (one or two).
+    # Cover every request admitted by the scheduler, including capacities above TP.
     original_sizes = mod.get_batch_sizes_to_capture
     def sizes(runner, *args, **kwargs):
         if runner is worker.model_runner:
-            import math
-            tp = worker.server_args.tp_size
-            return [tp // math.gcd(tp, worker.speculative_num_steps + 1)], []
+            return [capture_counts(worker.server_args.max_running_requests,
+                                   worker.server_args.tp_size,
+                                   worker.speculative_num_steps + 1)[1]], []
         return original_sizes(runner, *args, **kwargs)
     indexer = worker.draft_model_runner.model.model.decoder.self_attn.indexer
     indexer._glm53_draft_graph_steps = worker.speculative_num_steps + 1
