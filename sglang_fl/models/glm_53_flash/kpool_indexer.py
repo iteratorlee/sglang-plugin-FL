@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 from copy import copy
+import os
 from types import SimpleNamespace
 
 import torch
@@ -300,6 +301,11 @@ class IndexerKPool(Indexer):
     def _expand_with_tail(
         self, pool_indices: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor:
+        # The fused small-row kernel is slower for long prefill batches.
+        if (self.index_kpool == 4 and pool_indices.shape[0] <= 16
+                and os.getenv('SGLANG_FL_GLM53_KPOOL_EXPAND', '1') == '1'):
+            from .kpool_expand_npu import expand_with_tail
+            return expand_with_tail(pool_indices, positions)
         valid = pool_indices >= 0
         offsets = torch.arange(
             self.index_kpool, device=pool_indices.device, dtype=pool_indices.dtype
