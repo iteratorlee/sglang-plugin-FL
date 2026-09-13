@@ -22,6 +22,18 @@ class _State:
     def _norm_args(norm):
         if norm is None:
             return None, None
+        from sglang.srt.layers.layernorm import RMSNorm
+
+        # Only fuse the native FP32 RMS formula actually selected by this
+        # runtime. Other backends may add ModelSlim anti-bias or change casts.
+        # Keep calling their own norm instead of silently changing semantics.
+        if (
+            getattr(norm._forward_method, "__func__", None) is not RMSNorm.forward_native
+            or norm.cast_x_before_out_mul
+            or norm.override_orig_dtype is not None
+            or norm.variance_size_override is not None
+        ):
+            return None, None
         return norm.weight.data, norm.variance_epsilon
 
     def split(self, x, pre_fn, norm):

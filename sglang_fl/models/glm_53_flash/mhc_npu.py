@@ -88,6 +88,34 @@ def _hc_post_apply(
         tl.store(OUT + t * 4 * H + j * H + h, out, h < H)
 
 
+@triton.jit
+def _round_bf16_as_fp32(x):
+    bits=x.to(tl.uint32,bitcast=True)
+    rounded=(bits+0x7fff+((bits>>16)&1))&0xffff0000
+    # Preserve Inf; keep NaN a quiet NaN even if its payload is only low bits.
+    nonfinite=(bits&0x7f800000)==0x7f800000
+    payload=tl.where((bits&0x007fffff)!=0,bits|0x00400000,bits)&0xffff0000
+    result=tl.where(nonfinite,payload,rounded)
+    return result.to(tl.float32,bitcast=True)
+
+
+@triton.jit
+def _hc_pre_apply_norm(X, PRE, WEIGHT, OUT, H: tl.constexpr, EPS: tl.constexpr):
+    t=tl.program_id(0)
+    h=tl.arange(0,H)
+    r0=tl.load(X+t*4*H+h).to(tl.float32)
+    r1=tl.load(X+t*4*H+H+h).to(tl.float32)
+    r2=tl.load(X+t*4*H+2*H+h).to(tl.float32)
+    r3=tl.load(X+t*4*H+3*H+h).to(tl.float32)
+    p0=tl.load(PRE+t*4); p1=tl.load(PRE+t*4+1)
+    p2=tl.load(PRE+t*4+2); p3=tl.load(PRE+t*4+3)
+    mixed=(r0*p0+r2*p2)+(r1*p1+r3*p3)
+    narrow=_round_bf16_as_fp32(mixed)
+    inv=tl.rsqrt(tl.sum(narrow*narrow,0)/H+EPS)
+    w=tl.load(WEIGHT+h).to(tl.float32)
+    tl.store(OUT+t*H+h,(narrow*inv)*w)
+
+
 def hc_pre(
     x,
     hc_fn,
@@ -109,6 +137,15 @@ def hc_pre(
         (tokens, hc_mult * hc_mult), device=x.device, dtype=torch.float32
     )
     post = torch.empty((tokens, hc_mult), device=x.device, dtype=torch.float32)
+    fuse_norm = (
+        tokens > 0
+        and out_norm_weight is not None
+        and out_norm_eps is not None
+        and out_norm_weight.shape == (hidden,)
+        and out_norm_weight.device == x.device
+        and out_norm_weight.dtype in (torch.bfloat16, torch.float32)
+        and out_norm_weight.is_contiguous()
+    )
     if tokens:
         pre = torch.empty_like(post)
         mixes = F.linear(x.float(), hc_fn)
@@ -131,18 +168,25 @@ def hc_pre(
             enable_fp_fusion=False,
             enable_auto_bind_sub_block=False,
         )
-        _hc_pre_apply[(tokens, triton.cdiv(hidden, 1024))](
-            x,
-            pre,
-            layer_input,
-            H=hidden,
-            M=hc_mult,
-            B=1024,
-            num_warps=1,
-            enable_fp_fusion=False,
-            enable_auto_bind_sub_block=False,
-        )
-    return layer_input, comb, post, False
+        if fuse_norm:
+            _hc_pre_apply_norm[(tokens,)](
+                x, pre, out_norm_weight, layer_input, hidden, out_norm_eps,
+                enable_fp_fusion=False,
+                enable_auto_bind_sub_block=False,
+            )
+        else:
+            _hc_pre_apply[(tokens, triton.cdiv(hidden, 1024))](
+                x,
+                pre,
+                layer_input,
+                H=hidden,
+                M=hc_mult,
+                B=1024,
+                num_warps=1,
+                enable_fp_fusion=False,
+                enable_auto_bind_sub_block=False,
+            )
+    return layer_input, comb, post, fuse_norm
 
 
 def hc_post(x, residual, h_post, h_res, hc_mult):
