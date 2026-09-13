@@ -511,20 +511,27 @@ class IndexerKPool(Indexer):
         layer_id: int,
     ) -> torch.Tensor:
         bs = q.shape[0]
-        raw_req = forward_batch.req_pool_indices[:bs].to(torch.long)
-        token_rows = torch.arange(bs, device=q.device, dtype=torch.long)
         metadata = _get_full_attn_metadata(forward_batch)
-        seq_lens = metadata.seq_lens[:bs].to(torch.int32)
-        # num_token_non_padded is local to the MoE token shard under EP.
-        # Every attention TP rank still owns the complete request batch.
-        valid_req = (raw_req > 0) & (seq_lens > 0)
-        req = torch.where(
-            valid_req,
-            raw_req,
-            torch.full_like(raw_req, self._kpool_padding_req),
-        )
-        slot = torch.remainder(positions[:bs], self.index_kpool).to(torch.long)
-        tail_rows = req * self.index_kpool + slot
+        if self.index_kpool == 4:
+            from .kpool_metadata_npu import decode_metadata
+            req, tail_rows, write_locs, closing, pool_lens, actual_q, pooled_table = decode_metadata(
+                forward_batch.req_pool_indices[:bs], metadata.seq_lens[:bs],
+                positions[:bs], block_tables[:bs])
+        else:
+            raw_req = forward_batch.req_pool_indices[:bs].to(torch.long)
+            token_rows = torch.arange(bs, device=q.device, dtype=torch.long)
+            metadata = _get_full_attn_metadata(forward_batch)
+            seq_lens = metadata.seq_lens[:bs].to(torch.int32)
+            # num_token_non_padded is local to the MoE token shard under EP.
+            # Every attention TP rank still owns the complete request batch.
+            valid_req = (raw_req > 0) & (seq_lens > 0)
+            req = torch.where(
+                valid_req,
+                raw_req,
+                torch.full_like(raw_req, self._kpool_padding_req),
+            )
+            slot = torch.remainder(positions[:bs], self.index_kpool).to(torch.long)
+            tail_rows = req * self.index_kpool + slot
         # IndexPutV2 and npu_scatter_nd_update_ can capture the first decode
         # step's indices on this CANN version.  Read request/slot from device
         # memory in Triton so every graph replay updates the current tail.
@@ -534,18 +541,19 @@ class IndexerKPool(Indexer):
         compressed = self._compress(
             self._kpool_tail_k[req], self._kpool_tail_score[req]
         )
-        pool_ids = torch.div(
-            positions[:bs], self.index_kpool, rounding_mode="floor"
-        ).to(torch.long)
-        row = token_rows
-        page_columns = torch.div(pool_ids, 64, rounding_mode="floor")
-        page_columns = (page_columns * self.index_kpool).clamp_min(0)
-        # Inactive rows can likewise retain -1 in the page table.  Page 0 is
-        # reserved as a safe sink and is never exposed by a real sequence.
-        pages = block_tables[row, page_columns].clamp_min(0)
-        write_locs = pages.to(torch.long) * 64 + torch.remainder(pool_ids, 64)
-        closing = (slot == self.index_kpool - 1) & valid_req
-        write_locs = torch.where(closing, write_locs, 0)
+        if self.index_kpool != 4:
+            pool_ids = torch.div(
+                positions[:bs], self.index_kpool, rounding_mode="floor"
+            ).to(torch.long)
+            row = token_rows
+            page_columns = torch.div(pool_ids, 64, rounding_mode="floor")
+            page_columns = (page_columns * self.index_kpool).clamp_min(0)
+            # Inactive rows can likewise retain -1 in the page table.  Page 0 is
+            # reserved as a safe sink and is never exposed by a real sequence.
+            pages = block_tables[row, page_columns].clamp_min(0)
+            write_locs = pages.to(torch.long) * 64 + torch.remainder(pool_ids, 64)
+            closing = (slot == self.index_kpool - 1) & valid_req
+            write_locs = torch.where(closing, write_locs, 0)
         compressed = compressed * closing.to(compressed.dtype).unsqueeze(-1)
         scatter_rows_(
             _get_index_k_buffer(forward_batch, layer_id),
@@ -553,17 +561,19 @@ class IndexerKPool(Indexer):
             compressed,
         )
 
-        pool_lens = torch.div(seq_lens, self.index_kpool, rounding_mode="floor").to(
-            torch.int32
-        )
-        actual_q = torch.arange(1, bs + 1, dtype=torch.int32, device=q.device)
+        if self.index_kpool != 4:
+            pool_lens = torch.div(seq_lens, self.index_kpool, rounding_mode="floor").to(
+                torch.int32
+            )
+            actual_q = torch.arange(1, bs + 1, dtype=torch.int32, device=q.device)
+            pooled_table = self._pooled_page_table(block_tables)
         topk, _ = torch_npu.npu_lightning_indexer(
             query=q,
             key=_get_index_k_buffer(forward_batch, layer_id),
             weights=_ascend_lightning_weights(weights, q),
             actual_seq_lengths_query=actual_q,
             actual_seq_lengths_key=pool_lens,
-            block_table=self._pooled_page_table(block_tables),
+            block_table=pooled_table,
             layout_query="TND",
             layout_key="PA_BSND",
             sparse_count=self.index_topk // self.index_kpool,
