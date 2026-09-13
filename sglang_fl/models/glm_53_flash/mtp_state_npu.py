@@ -14,30 +14,30 @@ def _conv_verify(X, STATE, W, IDS, STARTS, OUT, MID,
                  DIM: tl.constexpr, STEPS: tl.constexpr, BLOCK: tl.constexpr):
     request = tl.program_id(0)
     slot = tl.load(IDS + request)
+    d = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    k = tl.arange(0, 4)
+    begin = tl.load(STARTS + request)
+    end = tl.load(STARTS + request + 1)
     if slot > 0:
-        d = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-        begin = tl.load(STARTS + request)
-        end = tl.load(STARTS + request + 1)
-        s0 = tl.load(STATE + slot * DIM * 3 + d * 3, d < DIM, 0)
-        s1 = tl.load(STATE + slot * DIM * 3 + d * 3 + 1, d < DIM, 0)
-        s2 = tl.load(STATE + slot * DIM * 3 + d * 3 + 2, d < DIM, 0)
-        w0 = tl.load(W + d * 4, d < DIM, 0).to(tl.float32)
-        w1 = tl.load(W + d * 4 + 1, d < DIM, 0).to(tl.float32)
-        w2 = tl.load(W + d * 4 + 2, d < DIM, 0).to(tl.float32)
-        w3 = tl.load(W + d * 4 + 3, d < DIM, 0).to(tl.float32)
-        for i in range(end - begin):
-            x = tl.load(X + (begin + i) * DIM + d, d < DIM, 0)
-            y = ((s0.to(tl.float32) * w0 + s1.to(tl.float32) * w1)
-                 + s2.to(tl.float32) * w2) + x.to(tl.float32) * w3
-            y = y / (1 + tl.exp(-y))
-            tl.store(OUT + (begin + i) * DIM + d, y, d < DIM)
-            mid = MID + ((request * STEPS + i) * DIM + d) * 3
-            tl.store(mid, s1, d < DIM)
-            tl.store(mid + 1, s2, d < DIM)
-            tl.store(mid + 2, x, d < DIM)
-            s0 = s1
-            s1 = s2
-            s2 = x
+        history = tl.load(STATE + slot * DIM * 3 + d[:, None] * 3 + k[None, :],
+                         (d[:, None] < DIM) & (k[None, :] < 3), 0)
+        weight = tl.load(W + d[:, None] * 4 + k[None, :], d[:, None] < DIM, 0).to(tl.float32)
+        for i in tl.static_range(STEPS):
+            if i < end - begin:
+                x = tl.load(X + (begin + i) * DIM + d, d < DIM, 0)
+                values = tl.where(k[None, :] < 3, history, x[:, None])
+                products = values.to(tl.float32) * weight
+                a0 = tl.sum(tl.where(k[None, :] == 0, products, 0), 1)
+                a1 = tl.sum(tl.where(k[None, :] == 1, products, 0), 1)
+                a2 = tl.sum(tl.where(k[None, :] == 2, products, 0), 1)
+                a3 = tl.sum(tl.where(k[None, :] == 3, products, 0), 1)
+                y = ((a0 + a1) + a2) + a3
+                y = y / (1 + tl.exp(-y))
+                tl.store(OUT + (begin + i) * DIM + d, y, d < DIM)
+                history = tl.gather(values,
+                    tl.broadcast_to(tl.minimum(k + 1, 3)[None, :], (BLOCK, 4)), 1)
+                tl.store(MID + ((request * STEPS + i) * DIM + d[:, None]) * 3 + k[None, :],
+                         history, (d[:, None] < DIM) & (k[None, :] < 3))
 
 
 def conv_verify(x, state, weight, indices, starts, intermediate):
@@ -53,9 +53,9 @@ def conv_verify(x, state, weight, indices, starts, intermediate):
             [(tuple(t.shape), str(t.dtype), t.stride()) for t in
              (x, state, weight, indices, starts, intermediate)]))
     out = torch.zeros_like(x)
-    _conv_verify[(indices.numel(), triton.cdiv(dim, 128))](
+    _conv_verify[(indices.numel(), triton.cdiv(dim, 32))](
         x, state, weight, indices, starts, out, intermediate,
-        DIM=dim, STEPS=intermediate.shape[1], BLOCK=128,
+        DIM=dim, STEPS=intermediate.shape[1], BLOCK=32,
         enable_fp_fusion=False, enable_auto_bind_sub_block=False)
     return out
 
