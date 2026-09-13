@@ -86,6 +86,8 @@ class Glm5NextForConditionalGenerationNextN(Glm5NextForConditionalGeneration):
         get_attn_tp_context().init_context(self.config.q_lora_rank, True)
         from .mtp_compat import patch_eagle_verify
         patch_eagle_verify()
+        from .mtp_draft_graph import patch_draft_extend_graph
+        patch_draft_extend_graph()
 
     @torch.no_grad()
     def forward(self, input_ids, positions, forward_batch):

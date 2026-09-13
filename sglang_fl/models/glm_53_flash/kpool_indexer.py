@@ -623,6 +623,35 @@ class IndexerKPool(Indexer):
             result = torch.cat((result, result.new_zeros(q.shape[0]-real_shape_tokens, result.shape[1])), 0)
         return result
 
+    def _draft_extend_topk(self, q, key, weights, gate_score, positions,
+                           forward_batch, block_tables, layer_id):
+        # Accepted tokens are packed by request; rejected draft slots must not
+        # write persistent tails. Device lengths change on each graph replay.
+        bs = forward_batch.batch_size
+        steps = self._glm53_draft_graph_steps
+        lens = forward_batch.extend_seq_lens[:bs]
+        starts = lens.cumsum(0) - lens
+        raw_req = forward_batch.req_pool_indices[:bs]
+        metadata = _get_full_attn_metadata(forward_batch)
+        metadata.actual_seq_lengths_q = lens.cumsum(0).int()
+        output = torch.zeros((q.shape[0] + 1, self.index_topk + self.index_kpool - 1),
+                             dtype=torch.int32, device=q.device)
+        for step in range(steps):
+            valid = (raw_req > 0) & (step < lens)
+            rows = (starts + step).clamp(max=q.shape[0] - 1).long()
+            step_batch = copy(forward_batch)
+            step_batch.req_pool_indices = torch.where(valid, raw_req, 0)
+            step_positions = positions.index_select(0, rows)
+            step_meta = copy(metadata)
+            step_meta.seq_lens = torch.where(valid, step_positions + 1, 0).int()
+            step_batch.attn_backend = SimpleNamespace(forward_metadata=step_meta)
+            result = self._decode_topk(q.index_select(0, rows), key.index_select(0, rows),
+                weights.index_select(0, rows), gate_score.index_select(0, rows),
+                step_positions, step_batch, block_tables, layer_id)
+            dest = torch.where(valid, rows, q.shape[0])
+            scatter_rows_(output, dest, result)
+        return output[:q.shape[0]]
+
     def forward_npu(
         self,
         x: torch.Tensor,
@@ -655,6 +684,11 @@ class IndexerKPool(Indexer):
 
         if forward_batch.forward_mode.is_target_verify():
             indices = self._verify_topk(q, key, weights, gate_score, positions,
+                forward_batch, block_tables, layer_id)
+        elif (forward_batch.forward_mode.is_draft_extend()
+              and getattr(forward_batch.attn_backend, 'graph_mode', False)
+              and hasattr(self, '_glm53_draft_graph_steps')):
+            indices = self._draft_extend_topk(q, key, weights, gate_score, positions,
                 forward_batch, block_tables, layer_id)
         elif forward_batch.forward_mode.is_extend():
             compressed = self._store_prefill_pools(
