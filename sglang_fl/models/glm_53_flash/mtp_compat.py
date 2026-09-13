@@ -103,22 +103,11 @@ def patch_mtp():
             return original_commit(self, accepted_steps, mamba_track_indices, mamba_steps_to_track, model)
         if mamba_track_indices is not None:
             raise ValueError('GLM MTP requires disabled radix cache')
-        from .mtp_state_npu import commit_state
+        from .mtp_commit_graph import commit_accepted
         linear = self.linear_attn_backend
-        cache = linear.req_to_token_pool.get_speculative_mamba2_params_all_layers()
         indices = linear.forward_metadata.mamba_cache_indices[:accepted_steps.numel()]
-        commit_state(cache.temporal, cache.intermediate_ssm, indices, accepted_steps)
-        commit_state(cache.conv[0], cache.intermediate_conv_window[0], indices, accepted_steps)
-        # KPool also carries a partial group of four keys across iterations.
-        # Request slots (not Mamba slots) index these per-layer tails.
         req_indices = linear.verify_req_pool_indices[:accepted_steps.numel()]
-        for layer in model.model.layers:
-            indexer = getattr(layer.self_attn, "indexer", None)
-            if indexer is not None and hasattr(indexer, "_kpool_mtp_tail_k"):
-                commit_state(indexer._kpool_tail_k.unsqueeze(0),
-                    indexer._kpool_mtp_tail_k.unsqueeze(0), req_indices, accepted_steps)
-                commit_state(indexer._kpool_tail_score.unsqueeze(0),
-                    indexer._kpool_mtp_tail_score.unsqueeze(0), req_indices, accepted_steps)
+        return commit_accepted(linear, model, indices, req_indices, accepted_steps)
 
     HybridLinearAttnBackend.update_mamba_state_after_mtp_verify = commit
     _PATCHED = True
