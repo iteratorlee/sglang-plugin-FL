@@ -1,4 +1,4 @@
-"""Allow small non-speculative GLM TP graphs with ceil-divided MoE slices."""
+"""Allow small GLM target TP graphs with ceil-divided MoE slices."""
 
 from contextvars import ContextVar
 from functools import wraps
@@ -15,7 +15,8 @@ def _enabled(runner):
         "Glm5NextForConditionalGeneration" in arch
         and str(runner.device).startswith("npu")
         and not args.enable_dp_attention
-        and not args.speculative_algorithm
+        and (not args.speculative_algorithm or (args.speculative_algorithm == "EAGLE"
+             and getattr(args, "speculative_eagle_topk", 0) == 1))
         and not args.enable_two_batch_overlap
         and any(0 < bs < args.tp_size for bs in args.cuda_graph_bs)
     )
@@ -36,7 +37,7 @@ def patch_small_graphs():
 
     @wraps(original_sizes)
     def batch_sizes(runner, num_tokens_per_bs=1):
-        if not _enabled(runner) or num_tokens_per_bs != 1:
+        if not _enabled(runner):
             return original_sizes(runner, num_tokens_per_bs)
         args = runner.server_args
         limit = runner.req_to_token_pool.size

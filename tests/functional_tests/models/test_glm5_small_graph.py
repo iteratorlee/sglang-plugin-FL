@@ -36,3 +36,17 @@ def test_small_graph_scope(unsupported):
     if unsupported == 'dp': r.server_args.enable_dp_attention = True
     if unsupported == 'speculative': r.server_args.speculative_algorithm = 'EAGLE'
     assert not _enabled(r)
+
+
+@pytest.mark.parametrize("steps", [2, 3, 5])
+def test_mtp_target_small_graph(steps):
+    from sglang_fl.models.glm_53_flash.small_graph import patch_small_graphs, _enabled
+    from sglang.srt.model_executor import cuda_graph_runner
+    r = runner()
+    r.server_args.speculative_algorithm = "EAGLE"
+    r.server_args.speculative_eagle_topk = 1
+    patch_small_graphs()
+    assert _enabled(r)
+    assert cuda_graph_runner.get_batch_sizes_to_capture(r, steps) == ([1], [])
+    r.model_config.hf_config.architectures = ["Glm5NextForConditionalGenerationNextN"]
+    assert not _enabled(r)
