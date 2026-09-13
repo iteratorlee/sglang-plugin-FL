@@ -66,18 +66,26 @@ def _hc_pre_apply(X, PRE, OUT, H: tl.constexpr, M: tl.constexpr, B: tl.constexpr
 def _hc_post_apply(
     X, RES, POST, COMB, OUT, H: tl.constexpr, M: tl.constexpr, B: tl.constexpr
 ):
+    # Four contiguous residual vectors avoid the expensive strided broadcast
+    # and reduction generated for [hc_mult, hidden_tile] on Ascend.
+    tl.static_assert(M == 4)
     t = tl.program_id(0)
     h = tl.program_id(1) * B + tl.arange(0, B)
-    i = tl.arange(0, M)
     x = tl.load(X + t * H + h, h < H, 0).to(tl.float32)
-    residual = tl.load(
-        RES + t * M * H + i[:, None] * H + h[None, :], h[None, :] < H, 0
-    ).to(tl.float32)
-    for j in tl.static_range(M):
-        comb = tl.load(COMB + t * M * M + i * M + j)
-        post = tl.load(POST + t * M + j)
-        out = post * x + tl.sum(comb[:, None] * residual, 0)
-        tl.store(OUT + t * M * H + j * H + h, out, h < H)
+    r0 = tl.load(RES + t * 4 * H + h, h < H, 0).to(tl.float32)
+    r1 = tl.load(RES + t * 4 * H + H + h, h < H, 0).to(tl.float32)
+    r2 = tl.load(RES + t * 4 * H + 2 * H + h, h < H, 0).to(tl.float32)
+    r3 = tl.load(RES + t * 4 * H + 3 * H + h, h < H, 0).to(tl.float32)
+    for j in tl.static_range(4):
+        c0 = tl.load(COMB + t * 16 + j)
+        c1 = tl.load(COMB + t * 16 + 4 + j)
+        c2 = tl.load(COMB + t * 16 + 8 + j)
+        c3 = tl.load(COMB + t * 16 + 12 + j)
+        post = tl.load(POST + t * 4 + j)
+        # Preserve the existing Ascend reduction tree and FP32 rounding.
+        mixed = (r0 * c0 + r2 * c2) + (r1 * c1 + r3 * c3)
+        out = post * x + mixed
+        tl.store(OUT + t * 4 * H + j * H + h, out, h < H)
 
 
 def hc_pre(
@@ -141,7 +149,7 @@ def hc_post(x, residual, h_post, h_res, hc_mult):
     tokens, hidden = x.shape
     out = x.new_empty((tokens, hc_mult * hidden))
     if tokens:
-        _hc_post_apply[(tokens, triton.cdiv(hidden, 512))](
+        _hc_post_apply[(tokens, triton.cdiv(hidden, 4096))](
             x,
             residual,
             h_post,
@@ -149,7 +157,7 @@ def hc_post(x, residual, h_post, h_res, hc_mult):
             out,
             H=hidden,
             M=hc_mult,
-            B=512,
+            B=4096,
             num_warps=1,
             enable_fp_fusion=False,
             enable_auto_bind_sub_block=False,
