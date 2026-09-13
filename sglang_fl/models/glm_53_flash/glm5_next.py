@@ -1668,7 +1668,8 @@ class Glm5NextForConditionalGeneration(nn.Module):
 
             if "visual" in name:
                 name = name.replace("attn.qkv.", "attn.qkv_proj.")
-                loaded_weight = vision_utils.pad_vit_attn_dummy_heads(
+                from .vision_weights import pad_vision_weight
+                loaded_weight = pad_vision_weight(
                     self.mm_config, name, loaded_weight
                 )
 
