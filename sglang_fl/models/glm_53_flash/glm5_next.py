@@ -1367,6 +1367,9 @@ class Glm5NextForConditionalGeneration(nn.Module):
 
         self.pp_group = get_pp_group()
         self.config = text_config
+        from .deepep_tuning import configure_small_batch_capacity
+
+        configure_small_batch_capacity(get_global_server_args(), get_parallel().attn_tp_size)
         self.tp_size = get_parallel().tp_size
         self.quant_config = quant_config
         self.determine_num_fused_shared_experts()
