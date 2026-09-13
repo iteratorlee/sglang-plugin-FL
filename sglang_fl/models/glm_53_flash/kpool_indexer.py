@@ -687,6 +687,8 @@ class IndexerKPool(Indexer):
             x.view(-1, self.hidden_size), self.index_kpool_compress_gate
         ).float()
         block_tables = _get_full_attn_metadata(forward_batch).block_tables
+        from .compact_index import index_block_table
+        block_tables = index_block_table(forward_batch, block_tables)
 
         if forward_batch.forward_mode.is_target_verify():
             indices = self._verify_topk(q, key, weights, gate_score, positions,

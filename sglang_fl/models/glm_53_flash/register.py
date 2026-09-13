@@ -410,4 +410,6 @@ def apply_glm5_patches() -> None:
     from .mtp_compat import patch_mtp
 
     patch_mtp()
+    from .compact_index import patch_compact_index
+    patch_compact_index()
     register_glm5_processor()
