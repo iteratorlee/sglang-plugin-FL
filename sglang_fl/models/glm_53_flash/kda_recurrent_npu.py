@@ -9,6 +9,7 @@ pointers explicitly, and carries state across each complete varlen sequence.
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import torch
@@ -136,6 +137,7 @@ def glm_kda_varlen_recurrent_npu(
     lower_bound: Optional[float],
     scale: Optional[float] = None,
     intermediate_state: Optional[torch.Tensor] = None,
+    prefill: bool = False,
 ) -> torch.Tensor:
     """Run a packed varlen KDA prefill and update each request state once."""
 
@@ -181,6 +183,17 @@ def glm_kda_varlen_recurrent_npu(
     output = torch.zeros_like(v)
     block_value_count = triton.cdiv(value_dim, block_v)
     heads_per_program = 2
+    if (prefill and intermediate_state is None
+        and os.getenv("SGLANG_FL_GLM53_KDA_PREFILL_HEADS", "1") == "1"
+        and num_q_heads == num_value_heads == 4
+        and key_dim == value_dim == 128
+        and initial_state_indices.numel() == 1 and q.shape[1] >= 128):
+        # A TP16 long prefill otherwise launches only four programs, each
+        # serially traversing two independent heads. Keep BV64 (128-byte
+        # output stripes) and the original recurrence/reductions; expose
+        # those heads as separate programs. Decode and MTP verification
+        # never opt into this policy, and multi-request shapes delegate.
+        heads_per_program = 1
     grid = (
         block_value_count,
         cu_seqlens.numel() - 1,

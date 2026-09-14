@@ -200,6 +200,7 @@ def _ascend_kda_prefill_recurrent(
         initial_state_indices=cache_indices,
         cu_seqlens=starts,
         lower_bound=lower_bound,
+        prefill=True,
     )
 
     # SGLang pads extend tokens to the TP alignment.  Do not advance state for

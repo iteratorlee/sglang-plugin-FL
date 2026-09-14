@@ -290,9 +290,9 @@ def test_glm5_kda_prefill_uses_npu_causal_conv(monkeypatch):
         seen.update(kwargs)
         assert weight.shape == (4, 4)
         assert bias is None
-        return x + 1
+        return x + 1, kwargs["final_states_out"]
 
-    monkeypatch.setattr(npu_conv, "causal_conv1d_fn_npu", fake_npu_conv)
+    monkeypatch.setattr(npu_conv, "causal_conv1d_fn_native", fake_npu_conv)
     x = torch.zeros(4, 3)
     state = torch.zeros(2, 4, 3)
     cache_indices = torch.tensor([1], dtype=torch.int32)
@@ -311,10 +311,10 @@ def test_glm5_kda_prefill_uses_npu_causal_conv(monkeypatch):
     assert result.shape == (3, 4)
     assert torch.equal(result, torch.ones(3, 4))
     assert seen["activation"] == "silu"
-    assert seen["conv_states"] is state
-    assert seen["has_initial_state"] is has_initial
-    assert seen["cache_indices"] is cache_indices
-    assert seen["query_start_loc"] is starts
+    assert seen["return_final_states"] is True
+    assert seen["initial_states"] is None
+    assert seen["final_states_out"].shape == (1, 4, 3)
+    assert seen["final_states_out"].data_ptr() == state[1].data_ptr()
 
 
 def test_glm5_kda_gate_layout_and_activation_match_v0511_contract():
@@ -527,12 +527,13 @@ def test_glm5_ascend_kda_rejects_unverified_modes(monkeypatch):
         def is_none(self):
             return self._is_none
 
-    with pytest.raises(NotImplementedError, match="speculative"):
+    with pytest.raises(NotImplementedError, match="EAGLE top-k one"):
         AscendKDAAttnBackend(
             SimpleNamespace(
                 spec_algorithm=_SpecAlgorithm(False),
                 server_args=SimpleNamespace(
-                    disable_radix_cache=True, chunked_prefill_size=-1
+                    disable_radix_cache=True, chunked_prefill_size=-1,
+                    speculative_algorithm="EAGLE", speculative_eagle_topk=2,
                 ),
             )
         )
