@@ -123,15 +123,18 @@ def test_glm5_kpool_head_gate_is_persistent_fp32_with_stable_topk(monkeypatch):
         self.hidden_size = hidden_size
         self.n_heads = index_n_heads
         self.head_dim = index_head_dim
+        self.index_topk = _kwargs["index_topk"]
         self.softmax_scale = index_head_dim**-0.5
 
     monkeypatch.setattr(kpool_module.Indexer, "__init__", fake_indexer_init)
     monkeypatch.setattr(kpool_module, "ReplicatedLinear", FakeReplicatedLinear)
     monkeypatch.setattr(kpool_module, "is_npu", lambda: False)
+    monkeypatch.setattr(kpool_module, "is_nsa_enable_prefill_cp", lambda: False)
     monkeypatch.setattr(
         kpool_module,
         "get_global_server_args",
-        lambda: SimpleNamespace(max_running_requests=1, device="cpu"),
+        lambda: SimpleNamespace(max_running_requests=1, device="cpu",
+                                speculative_num_draft_tokens=None),
     )
     config = SimpleNamespace(
         index_kpool=4,
@@ -716,7 +719,20 @@ def test_glm5_kpool_chunked_prefill_matches_one_shot(monkeypatch):
 
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     torch.testing.assert_close(chunked_cache, one_shot_cache, rtol=0, atol=0)
-    assert torch.count_nonzero(chunked._kpool_tail_k[1]) == 0
+    # At a closed-pool boundary there is no valid tail; its unused storage
+    # need not be cleared. Verify subsequent pools ignore those stale rows.
+    next_keys = torch.arange(24, 32, dtype=torch.float32).reshape(4, 2).bfloat16()
+    next_scores = torch.linspace(-0.5, 0.5, 8).reshape(4, 2)
+    expected_next = one_shot._store_prefill_pools(
+        next_keys, next_scores, make_batch(one_shot_cache, 4, 16),
+        block_tables, layer_id=3,
+    )[0]
+    actual_next = chunked._store_prefill_pools(
+        next_keys, next_scores, make_batch(chunked_cache, 4, 16),
+        block_tables, layer_id=3,
+    )[0]
+    torch.testing.assert_close(actual_next, expected_next, rtol=0, atol=0)
+    torch.testing.assert_close(chunked_cache, one_shot_cache, rtol=0, atol=0)
 
 
 def test_glm5_kpool_prefill_topk_is_chunk_invariant(monkeypatch):

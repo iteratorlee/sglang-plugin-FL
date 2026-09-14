@@ -194,6 +194,18 @@ def glm_kda_varlen_recurrent_npu(
         # those heads as separate programs. Decode and MTP verification
         # never opt into this policy, and multi-request shapes delegate.
         heads_per_program = 1
+    if (heads_per_program == 1
+        and os.getenv("SGLANG_FL_GLM53_KDA_PREFILL_PREPARE", "0") == "1"
+        and q.device.type == "npu"
+        and all(t.dtype == torch.bfloat16 for t in (q, k, v, a, b))
+        and initial_state_source.dtype == torch.float32):
+        from .kda_prefill_npu import run_prepared_prefill
+
+        return run_prepared_prefill(
+            q=q, k=k, v=v, a=a, b=b, A_log=A_log, dt_bias=dt_bias,
+            state=initial_state_source, indices=initial_state_indices,
+            starts=cu_seqlens, output=output, scale=scale, lower_bound=lower_bound,
+        )
     grid = (
         block_value_count,
         cu_seqlens.numel() - 1,
