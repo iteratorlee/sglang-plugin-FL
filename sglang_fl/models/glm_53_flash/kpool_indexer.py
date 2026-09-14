@@ -434,13 +434,12 @@ class IndexerKPool(Indexer):
             offset += q_len
         return compressed_by_request
 
-    def _prefill_topk(
+    def _prefill_pooled_topk(
         self,
         q: torch.Tensor,
         weights: torch.Tensor,
         compressed_by_request: list[torch.Tensor],
         forward_batch: ForwardBatch,
-        positions: torch.Tensor,
     ) -> torch.Tensor:
         pooled_topk = self.index_topk // self.index_kpool
         result = []
@@ -502,7 +501,30 @@ class IndexerKPool(Indexer):
                 start = end
             result.append(torch.cat(rows, dim=0))
             offset += q_len
-        pool_indices = torch.cat(result, dim=0)
+        return torch.cat(result, dim=0)
+
+    def _prefill_topk(
+        self,
+        q: torch.Tensor,
+        weights: torch.Tensor,
+        compressed_by_request: list[torch.Tensor],
+        forward_batch: ForwardBatch,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        from .prefill_index_parallel import enabled, parallel_pooled_topk, verify_once
+        if enabled(q, forward_batch):
+            from sglang.srt.layers.dp_attention import get_attention_tp_group
+            pool_indices = parallel_pooled_topk(
+                self._prefill_pooled_topk, q, weights, compressed_by_request,
+                forward_batch, self.index_topk // self.index_kpool,
+                get_attention_tp_group().device_group,
+            )
+            verify_once(self, pool_indices, q, weights, compressed_by_request,
+                        forward_batch, get_attention_tp_group().device_group)
+        else:
+            pool_indices = self._prefill_pooled_topk(
+                q, weights, compressed_by_request, forward_batch
+            )
         valid_rows = pool_indices.shape[0]
         topk = self._expand_with_tail(pool_indices, positions[:valid_rows])
         # mHC/communication kernels may pad hidden states (e.g. 27 -> 32
