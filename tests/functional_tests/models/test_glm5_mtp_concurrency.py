@@ -73,3 +73,26 @@ def test_many_request_accepted_kpool_graph(monkeypatch, bs, steps):
 def test_capture_capacity_boundaries(requests,tokens,wanted):
     from sglang_fl.models.glm_53_flash.mtp_draft_graph import capture_counts
     assert capture_counts(requests,16,tokens)==wanted
+
+
+@pytest.mark.parametrize("requests,tp,tokens,draft,extend", [
+    (1,16,4,[16],[4]),
+    (4,16,4,[16],[4]),
+    (8,16,4,[16],[4,8]),
+    (17,16,4,[16,32],[4,8,12,16,20]),
+    (33,16,3,[16,32,48],[16,32,48]),
+    (33,16,5,[16,32,48],[16,32,48]),
+    (33,32,4,[32,64],[8,16,24,32,40]),
+])
+def test_dense_mtp_capture_selects_smallest_legal_graph(requests,tp,tokens,draft,extend):
+    import bisect
+    import math
+    from sglang_fl.models.glm_53_flash.mtp_draft_graph import capture_batch_sizes
+    assert capture_batch_sizes(requests,tp,tokens,dense=True)==(draft,extend)
+    assert capture_batch_sizes(requests,tp,tokens)==([draft[-1]],[extend[-1]])
+    for real in range(1,requests+1):
+        d=draft[bisect.bisect_left(draft,real)]
+        e=extend[bisect.bisect_left(extend,real)]
+        assert real<=d<real+tp and d%tp==0
+        unit=tp//math.gcd(tp,tokens)
+        assert real<=e<real+unit and e*tokens%tp==0

@@ -15,6 +15,23 @@ def capture_counts(max_requests, tp, draft_tokens):
     return ((max_requests + tp - 1) // tp * tp,
             (max_requests + unit - 1) // unit * unit)
 
+
+def capture_batch_sizes(max_requests, tp, draft_tokens, *, dense=False):
+    """Capture each legal intermediate MTP size when latency is preferred.
+
+    Draft residuals require request batches divisible by TP; accepted extension
+    requires bs*draft_tokens divisible by TP. The existing runner replays the
+    smallest captured size >= the actual batch, so no replay change is needed.
+    Keep the previous one-size allocation unless explicitly enabled, preserving
+    deployments whose HBM budget was validated with the old graph allocation.
+    """
+    draft_max, extend_max = capture_counts(max_requests, tp, draft_tokens)
+    if not dense:
+        return [draft_max], [extend_max]
+    unit = tp // math.gcd(tp, draft_tokens)
+    return list(range(tp, draft_max + 1, tp)), list(range(unit, extend_max + 1, unit))
+
+
 def patch_draft_extend_graph():
     global _PATCHED
     if _PATCHED: return
@@ -35,21 +52,26 @@ def patch_draft_extend_graph():
             return original(self)
         from sglang.srt.speculative import eagle_draft_cuda_graph_runner as draft_mod
         previous_sizes = draft_mod.get_batch_sizes_to_capture
+        draft_batches, _ = capture_batch_sizes(
+            args.max_running_requests, args.tp_size, self.speculative_num_steps + 1,
+            dense=os.getenv("SGLANG_FL_GLM53_MTP_DENSE_GRAPHS") == "1")
         def draft_sizes(runner, *args, **kwargs):
             if runner is self.model_runner:
-                return [capture_counts(self.server_args.max_running_requests, args_tp,
-                                       self.speculative_num_steps + 1)[0]], []
+                return draft_batches, []
             return previous_sizes(runner, *args, **kwargs)
         from sglang.srt.hardware_backend.npu.graph_runner import eagle_draft_npu_graph_runner as npu_mod
         from sglang.srt.configs.model_config import is_deepseek_nsa
         npu_mod.is_deepseek_nsa = is_deepseek_nsa
-        args_tp = args.tp_size
         indexer = self.draft_model_runner.model.model.decoder.self_attn.indexer
         indexer._glm53_draft_decode = True
         draft_mod.get_batch_sizes_to_capture = draft_sizes
         try: original(self)
         finally: draft_mod.get_batch_sizes_to_capture = previous_sizes
         self.cuda_graph_runner_for_draft_extend = GlmDraftExtendGraph(self)
+        logging.getLogger(__name__).info(
+            "GLM MTP graph capture sizes: draft=%s accepted=%s",
+            getattr(self.cuda_graph_runner, "capture_bs", []),
+            getattr(self.cuda_graph_runner_for_draft_extend, "capture_bs", []))
         logging.getLogger(__name__).info('GLM MTP accepted-token extend NPU graph captured')
     EAGLEWorker.draft = wrap_draft_transaction(EAGLEWorker.draft)
     EAGLEWorker.init_cuda_graphs = init
@@ -99,11 +121,13 @@ def GlmDraftExtendGraph(worker):
     # Capture a padded request count whose token count is divisible by TP.
     # Cover every request admitted by the scheduler, including capacities above TP.
     original_sizes = mod.get_batch_sizes_to_capture
+    _, extend_batches = capture_batch_sizes(
+        worker.server_args.max_running_requests, worker.server_args.tp_size,
+        worker.speculative_num_steps + 1,
+        dense=os.getenv("SGLANG_FL_GLM53_MTP_DENSE_GRAPHS") == "1")
     def sizes(runner, *args, **kwargs):
         if runner is worker.model_runner:
-            return [capture_counts(worker.server_args.max_running_requests,
-                                   worker.server_args.tp_size,
-                                   worker.speculative_num_steps + 1)[1]], []
+            return extend_batches, []
         return original_sizes(runner, *args, **kwargs)
     indexer = worker.draft_model_runner.model.model.decoder.self_attn.indexer
     indexer._glm53_draft_graph_steps = worker.speculative_num_steps + 1
