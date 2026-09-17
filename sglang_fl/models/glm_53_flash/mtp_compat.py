@@ -144,5 +144,7 @@ def patch_eagle_verify():
     if _EAGLE_PATCHED:
         return
     from sglang.srt.speculative.eagle_worker import EAGLEWorker
+    from .mtp_sampling import patch_mtp_sampling
+    patch_mtp_sampling()
     EAGLEWorker.verify = wrap_glm_verify(EAGLEWorker.verify)
     _EAGLE_PATCHED = True

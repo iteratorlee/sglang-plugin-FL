@@ -91,3 +91,22 @@ dequant 仅处理设备端路由计数指定的有效行，并保留填充区为
 
 本镜像应给生产服务使用独立 Triton cache；不要混用不同
 `TRITON_ALL_BLOCKS_PARALLEL` 编译模式产生的缓存。
+
+## NPU MTP 采样语义
+
+SGLang 0.5.11 缺少 NPU tree sampling kernel 时，上游 EAGLE verifier 会将
+非贪心请求回退为 argmax。GLM 的 `mtp_sampling.py` 在这个分支为每个
+verify 节点按目标 logits 的 temperature/top-k/top-p/min-p 分布抽样，
+再复用树匹配：抽样命中 draft 边时继续接受，否则输出该抽样作为 bonus
+token。抽样结果从 TP rank 0 广播，确保各 rank 提交相同的 KV/KDA 前缀。
+
+该适配只作用于 GLM、NPU、非贪心请求和缺少原生 tree sampling kernel
+的组合；temperature=0 直接调用原 verifier。模型计算、W8A8、graph 和
+现有 KV/KDA 提交逻辑保持。当前支持部署使用的 EAGLE v1、topk=1、关闭
+overlap；不保证与非 MTP 或不同批次消耗相同随机数，也不扩展上游的
+speculative penalty 语义。不要用 do_sample=false 代替 temperature=0。
+
+真实 NPU 回归在 `tests/functional_tests/models/test_glm5_mtp_sampling.py`，
+覆盖采样分布、过滤参数、混合批次、接受前缀及 TP 同步接入。分布测试
+不能代替整模型质量评测；部署后还应检查非贪心请求不再出现
+`Falling back to greedy verification`，并进行同输入、同预算的回放。
