@@ -121,3 +121,25 @@ jobs:
     with:
       platform: thead
     secrets: inherit
+
+  # ============================================================
+  # Job 6d: Enflame GCU platform testing
+  # ============================================================
+  test-enflame:
+    needs: discover
+    if: contains(fromJson(needs.discover.outputs.platforms), 'enflame')
+    uses: ./.github/workflows/_platform_test.yml
+    with:
+      platform: enflame
+    secrets: inherit
+
+  # ============================================================
+  # Job 6e: Hygon DCU platform testing
+  # ============================================================
+  test-hygon:
+    needs: discover
+    if: contains(fromJson(needs.discover.outputs.platforms), 'hygon')
+    uses: ./.github/workflows/_platform_test.yml
+    with:
+      platform: hygon
+    secrets: inherit
