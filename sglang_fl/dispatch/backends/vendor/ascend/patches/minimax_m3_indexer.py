@@ -191,6 +191,12 @@ def _patch_single_head_merge(indexer):
         return
 
     def merge(*args, **kwargs):
+        if os.environ.get("SGLANG_FL_ASCEND_MINIMAX_FUSED_MERGE") == "1":
+            from .minimax_m3_indexer_merge import merge_vector_candidates
+
+            fused = merge_vector_candidates(*args, **kwargs)
+            if fused is not None:
+                return fused
         result = original(*args, **kwargs)
         if result.shape[0] == 1:
             _fl_minimax_deduplicate_blocks[(result.shape[0], result.shape[1])](
@@ -217,8 +223,25 @@ class _VectorScoreDispatch:
     def __getitem__(self, grid):
         def launch(*args, **kwargs):
             if len(args) != len(_ARG_NAMES):
+                if (
+                    os.environ.get("SGLANG_FL_ASCEND_MINIMAX_FUSED_MERGE") == "1"
+                    and len(args) >= 7
+                ):
+                    from .minimax_m3_indexer_merge import clear_vector_candidates
+
+                    # Current ABI output slots; clearing only our private tags
+                    # cannot affect an unsupported producer's tensor values.
+                    clear_vector_candidates(args[5], args[6])
                 return self.original[grid](*args, **kwargs)
             p = dict(zip(_ARG_NAMES, args))
+            fused_merge = os.environ.get("SGLANG_FL_ASCEND_MINIMAX_FUSED_MERGE") == "1"
+            if fused_merge:
+                from .minimax_m3_indexer_merge import (
+                    clear_vector_candidates,
+                    mark_vector_candidates,
+                )
+
+                clear_vector_candidates(p["cs"], p["ci"])
             if not (
                 p["gqa"] == 1
                 and p["dim"] == 128
@@ -231,6 +254,8 @@ class _VectorScoreDispatch:
             ):
                 return self.original[grid](*args, **kwargs)
             direct = kwargs["USE_DIRECT_PAGE_LOOKUP"]
+            if fused_merge:
+                mark_vector_candidates(p["cs"], p["ci"], p["seq"], p["sl_b"], p["sl_h"])
             if not self.logged:
                 logger.warning("Using FL vector-only MiniMax single-head indexer")
                 self.logged = True
