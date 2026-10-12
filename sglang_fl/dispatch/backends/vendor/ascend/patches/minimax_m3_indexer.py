@@ -215,6 +215,8 @@ def _patch_single_head_merge(indexer):
 
 class _VectorScoreDispatch:
     _sglang_fl_vector_score = True
+    # For the guarded head-one contract all chunks write every TOPK slot.
+    _sglang_fl_all_candidates_written = True
 
     def __init__(self, original):
         self.original = original
