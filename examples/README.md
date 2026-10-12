@@ -71,3 +71,17 @@ For precision comparison across modes, use `tests/test_precision_align.py` or `t
 Set `M31_MODEL_PATH`, `M31_PORT` or `M31_LOG_DIR` when needed, then run the script inside the prepared Ascend container. Server stdout/stderr should be redirected by the caller.
 
 With the official SGLang benchmark at C64, 128 requests, exact 1024 output tokens and 8 warmups, this profile measured 1387.53 total tokens/s at 1024 input and 2370.48 total tokens/s at 4096 input. The previous max-running=8 configuration measured 388.40 and 804.06 respectively. Mean TPOT increases with the larger batch (1k: 40.34→86.92ms). Fourteen basic semantic cases passed. These are throughput measurements, not a full precision claim; long-input tuning is still in progress. This is a reproducible reference profile, not a claim of optimal settings for every workload.
+
+### DP attention profile
+
+`minimax_m31_ascend_dp_attention.sh` uses TP16 with DP attention. It defaults to DP4; set `M31_DP_SIZE=2` for DP2. Global max running requests remains 64. Local graph buckets are 4/8/12/16 for DP4 and 8/16/24/32 for DP2. The CLI chunk sizes 16384/8192 resolve to 4096 per attention group. The image, context, sampling and stability settings match the TP16/DP1 reference above. `M31_MODEL_PATH`, `M31_PORT` and `M31_LOG_DIR` have the same meaning.
+
+With the official benchmark at C64, output1024 and 8 full-output warmups:
+
+| Input | Formal requests | DP1 total tokens/s | DP2 | DP4 | DP4 total tokens/s/logical NPU |
+|---|---:|---:|---:|---:|---:|
+| 4096 | 128 | 2370.48 | 2890.36 | 3712.51 | 232.03 |
+| 16384 | 64 (screen) | 3091.12 | 3750.04 | 5504.24 | 344.01 |
+| 32768 | 64 (screen) | 3242.84 | 5433.20 | 6859.72 | 428.73 |
+
+All profiles use 16 logical NPUs. DP4 passed 14 sequential and 64 concurrent basic semantic checks, and all 630 logged decode batches used graph. Long-input results are screening measurements; final validation with 128 requests remains pending. DP4 improves aggregate throughput, while mean TPOT at 32k increases from DP2's 133.34ms to 159.85ms. These checks do not establish full model precision equivalence.
