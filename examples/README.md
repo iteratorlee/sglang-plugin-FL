@@ -2,7 +2,7 @@
 
 Offline inference examples for smoke-testing sglang-plugin-FL with various models.
 
-Each script is self-contained: it loads the model, runs inference, validates output,
+Each `*_offline_inference.py` script is self-contained: it loads the model, runs inference, validates output,
 and exits with code 0 on success or non-zero on failure. This makes them directly
 usable in CI pipelines.
 
@@ -31,7 +31,7 @@ MODEL_PATH=/data/models/Qwen3.6-27B TP_SIZE=2 python examples/qwen3_6_27b_offlin
 
 ## CI Integration
 
-These scripts are designed for CI use:
+The offline Python examples are designed for CI use:
 
 - **Exit code**: 0 = pass, non-zero = fail
 - **Model path**: Configurable via `MODEL_PATH` env var
@@ -62,3 +62,12 @@ Control the plugin behavior via environment variables:
 | Vendor | `USE_FLAGGEMS=0 SGLANG_FL_PREFER=vendor` | Layer 2 only: vendor fused ops |
 
 For precision comparison across modes, use `tests/test_precision_align.py` or `tests/validate.sh`.
+
+
+## MiniMax-M3.1 W8A8 on Ascend (client concurrency 64)
+
+`minimax_m31_ascend_c64.sh` starts a persistent inference service using a TP16 / DP1 launch profile for the CANN 9.0 / TorchNPU 2.10 image with the MiniMax plugin patches installed. It increases server max running requests from 8 to 64 and captures full decode graphs for 1/2/4/8/16/24/32/48/64. Context length is 67584; chunked prefill is 4096; BF16 KV, plugin, FlagGems (`add`) and FlagTree stay enabled. Tested with image `m31-sglang-main-flagos:opt1-decode-merge` (based on `quay.io/ascend/sglang:main-cann9.0.0-a3`), SGLang `0.5.20.dev628+g7f1f8c706` and FlagTree `0.6.1+ascend3.5`. Prefix caching, MTP and overlap remain disabled. Keep the serial graph update, HCCL and indexer stability settings in the script.
+
+Set `M31_MODEL_PATH`, `M31_PORT` or `M31_LOG_DIR` when needed, then run the script inside the prepared Ascend container. Server stdout/stderr should be redirected by the caller.
+
+With the official SGLang benchmark at C64, 128 requests, exact 1024 output tokens and 8 warmups, this profile measured 1387.53 total tokens/s at 1024 input and 2370.48 total tokens/s at 4096 input. The previous max-running=8 configuration measured 388.40 and 804.06 respectively. Mean TPOT increases with the larger batch (1k: 40.34→86.92ms). Fourteen basic semantic cases passed. These are throughput measurements, not a full precision claim; long-input tuning is still in progress. This is a reproducible reference profile, not a claim of optimal settings for every workload.
