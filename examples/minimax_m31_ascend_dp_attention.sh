@@ -52,6 +52,7 @@ case "$M31_DP_SIZE" in
   4) M31_GRAPH_BUCKETS=(4 8 12 16); M31_GRAPH_MAX=16; M31_CHUNK_SIZE=16384 ;;
   *) echo "M31_DP_SIZE must be 2 or 4" >&2; exit 2 ;;
 esac
+M31_CHUNK_SIZE=${M31_CHUNKED_PREFILL_SIZE:-$M31_CHUNK_SIZE}
 
 exec python3 -m sglang.launch_server \
   --model-path "$M31_MODEL_PATH" \
