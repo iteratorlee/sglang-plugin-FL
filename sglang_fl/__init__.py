@@ -441,8 +441,10 @@ def _apply_vendor_patches() -> None:
     on sglang internals. Called last in load_plugin(), after every sglang_fl
     layer (FlagGems ATen, dispatch system, AROUND hooks, communicator).
     Resolves vendor_name via FlagGems' DeviceDetector — no PlatformFL needed,
-    so this still runs before sglang's model_runner is imported. Silently
-    skips when the vendor module is absent or hardware is unrecognised.
+    so this still runs before sglang's model_runner is imported. Skips when
+    the vendor module is absent or hardware is unrecognised. Import failures
+    inside an existing vendor patch propagate; serving without required
+    compatibility patches can silently produce an invalid runtime.
     """
     import importlib
 
@@ -457,8 +459,15 @@ def _apply_vendor_patches() -> None:
     try:
         importlib.import_module(module)
         logger.info("vendor patch loaded: %s", module)
+    except ModuleNotFoundError as exc:
+        if exc.name and (exc.name == module or module.startswith(exc.name + ".")):
+            logger.info("vendor patch absent: %s", module)
+            return
+        logger.exception("vendor patch import failed: %s", module)
+        raise
     except ImportError:
-        logger.info("vendor patch absent: %s", module)
+        logger.exception("vendor patch import failed: %s", module)
+        raise
 
 
 # ─── Communicator AROUND hooks ────────────────────────────────────────────────

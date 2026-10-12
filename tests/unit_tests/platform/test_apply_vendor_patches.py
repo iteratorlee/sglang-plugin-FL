@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # Tests for _apply_vendor_patches in sglang_fl/__init__.py.
+# Author: liyan <yan.l@pku.edu.cn>
 
 import importlib
 import logging
@@ -62,8 +63,7 @@ class TestApplyVendorPatches:
     def test_non_import_error_propagates(
         self, mock_device_detector, monkeypatch
     ):
-        """Only ImportError is treated as 'absent'. Any other exception from
-        the vendor patch.py's own import-time code must bubble up."""
+        """Exceptions from a vendor patch's import-time code must bubble up."""
         mock_device_detector("fakevendor")
 
         real_import = importlib.import_module
@@ -77,6 +77,36 @@ class TestApplyVendorPatches:
 
         with pytest.raises(RuntimeError, match="patch module crashed"):
             _apply_vendor_patches()
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            ModuleNotFoundError(
+                "No module named minimax_m3_prefill_meta",
+                name="sglang_fl.dispatch.backends.vendor.fakevendor.patches.minimax_m3_prefill_meta",
+            ),
+            ImportError("cannot import name 'required_symbol' from dependency"),
+        ],
+    )
+    def test_internal_import_failure_propagates(
+        self, failure, caplog, mock_device_detector, monkeypatch
+    ):
+        """Missing dependencies must not be mistaken for an absent vendor."""
+        mock_device_detector("fakevendor")
+        real_import = importlib.import_module
+
+        def failing_import(name, *args, **kwargs):
+            if name.endswith(".fakevendor.patch"):
+                raise failure
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(importlib, "import_module", failing_import)
+        with caplog.at_level(logging.ERROR, logger="sglang_fl"):
+            with pytest.raises(type(failure)) as captured:
+                _apply_vendor_patches()
+        assert captured.value is failure
+        assert "vendor patch import failed" in caplog.text
+        assert "vendor patch absent" not in caplog.text
 
     def test_idempotent_repeated_calls(
         self, caplog, mock_device_detector, inject_vendor_module
