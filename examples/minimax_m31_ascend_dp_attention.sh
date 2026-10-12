@@ -35,6 +35,18 @@ export SGLANG_FLAGGEMS_LOG_PATH="$M31_LOG_DIR/gems_aten.log"
 M31_MODEL_PATH=${M31_MODEL_PATH:-/public-flash/models/MiniMax-M3.1-preview-private-W8A8-FlagOS-20260929}
 M31_PORT=${M31_PORT:-33013}
 M31_DP_SIZE=${M31_DP_SIZE:-4}
+M31_MAX_RUNNING_REQUESTS=${M31_MAX_RUNNING_REQUESTS:-64}
+M31_PP_ARGS=()
+if [[ -n "${M31_PP_MAX_MICRO_BATCH_SIZE:-}" ]]; then
+  M31_PP_ARGS=(--pp-max-micro-batch-size "$M31_PP_MAX_MICRO_BATCH_SIZE")
+fi
+M31_NETWORK_ARGS=()
+if [[ -n "${M31_DIST_INIT_ADDR:-}" ]]; then
+  M31_NETWORK_ARGS+=(--dist-init-addr "$M31_DIST_INIT_ADDR")
+fi
+if [[ -n "${M31_NCCL_PORT:-}" ]]; then
+  M31_NETWORK_ARGS+=(--nccl-port "$M31_NCCL_PORT")
+fi
 case "$M31_DP_SIZE" in
   2) M31_GRAPH_BUCKETS=(8 16 24 32); M31_GRAPH_MAX=32; M31_CHUNK_SIZE=8192 ;;
   4) M31_GRAPH_BUCKETS=(4 8 12 16); M31_GRAPH_MAX=16; M31_CHUNK_SIZE=16384 ;;
@@ -53,6 +65,7 @@ exec python3 -m sglang.launch_server \
   --enable-dp-attention \
   --nnodes 1 \
   --node-rank 0 \
+  "${M31_NETWORK_ARGS[@]}" \
   --random-seed 1012273410 --host 0.0.0.0 \
   --port "$M31_PORT" \
   --context-length 67584 \
@@ -65,5 +78,6 @@ exec python3 -m sglang.launch_server \
   --cuda-graph-backend-decode full \
   --cuda-graph-backend-prefill disabled \
   --cuda-graph-max-bs-decode "$M31_GRAPH_MAX" \
-  --max-running-requests 64 \
+  --max-running-requests "$M31_MAX_RUNNING_REQUESTS" \
+  "${M31_PP_ARGS[@]}" \
   --cuda-graph-bs-decode "${M31_GRAPH_BUCKETS[@]}"
