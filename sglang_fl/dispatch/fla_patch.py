@@ -2,6 +2,7 @@
 """Monkey-patch SGLang FLA functions to use dispatch mechanism."""
 
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +61,27 @@ def patch_fla_functions():
             gdn_triton.fused_recurrent_gated_delta_rule_packed_decode = (
                 fused_recurrent_gated_delta_rule_packed_decode_bridge
             )
+            if os.environ.get("SGLANG_FL_GEMS_GDN_DECODE") == "1":
+                from sglang_fl.dispatch.bridge.fla_sigmoid_gating import (
+                    fused_sigmoid_gating_delta_rule_update_bridge,
+                )
+                from flag_gems.runtime.backend._ascend.fla import (
+                    fused_sigmoid_gating_delta_rule_update,
+                )
+
+                if not callable(fused_sigmoid_gating_delta_rule_update):
+                    raise RuntimeError("FlagGems GDN entrypoint is unavailable")
+                if not callable(
+                    getattr(gdn_triton, "fused_sigmoid_gating_delta_rule_update", None)
+                ):
+                    raise RuntimeError("SGLang GDN call site is unavailable")
+                gdn_triton.fused_sigmoid_gating_delta_rule_update = (
+                    fused_sigmoid_gating_delta_rule_update_bridge
+                )
             logger.info("Patched FLA functions in gdn_triton.py")
         except Exception as e:
+            if os.environ.get("SGLANG_FL_GEMS_GDN_DECODE") == "1":
+                raise
             logger.warning(f"Failed to patch gdn_triton.py: {e}")
 
         logger.info("Successfully patched FLA functions for dispatch")
@@ -69,5 +89,7 @@ def patch_fla_functions():
         return _originals
 
     except Exception as e:
+        if os.environ.get("SGLANG_FL_GEMS_GDN_DECODE") == "1":
+            raise
         logger.error(f"Failed to patch FLA functions: {e}")
         return None

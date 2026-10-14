@@ -38,8 +38,19 @@ def register_builtins(registry) -> None:
 
     backend = AscendBackend()
     is_avail = backend.is_available
+    from .impl.gdn_gems import fused_sigmoid_gating_delta_rule_update_gems
 
     impls = [
+        OpImpl(
+            op_name="fused_sigmoid_gating_delta_rule_update",
+            impl_id="vendor.ascend.gems",
+            kind=BackendImplKind.VENDOR,
+            fn=_bind_is_available(
+                fused_sigmoid_gating_delta_rule_update_gems, is_avail
+            ),
+            vendor="ascend",
+            priority=BackendPriority.VENDOR,
+        ),
         OpImpl(
             op_name="silu_and_mul",
             impl_id="vendor.ascend",
