@@ -11,6 +11,7 @@ import logging
 
 from .patches.attention_registry import patch_attn_backend_wrapper
 from .patches.graph_stages import patch_ascend_graph_stages
+from .patches.minimax_m3_graph_audit import patch_minimax_m3_graph_audit
 from .patches.graph_updates import patch_ascend_graph_updates
 from .patches.hccl_tp import patch_ascend_tp_hccl_options
 from .patches.minimax_m3_image import (
@@ -71,6 +72,7 @@ def apply_ascend_patches() -> None:
     patch_minimax_m3_image_grid_cache_key()
     patch_minimax_m3_vision_rope_compile()
     patch_minimax_m3_kv_pool()
+    patch_minimax_m3_graph_audit()
 
 
 apply_ascend_patches()
