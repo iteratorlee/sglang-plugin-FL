@@ -21,6 +21,7 @@ from .patches.minimax_m3_image import (
 )
 from .patches.minimax_m3_indexer import patch_ascend_minimax_vector_indexer
 from .patches.minimax_m3_prefill_causal import patch_ascend_minimax_prefill_causal
+from .patches.minimax_m3_prefill_future import patch_ascend_minimax_prefill_future
 from .patches.minimax_m3_score_buffers import patch_ascend_minimax_score_buffers
 from .patches.minimax_m3_prefill_meta import patch_minimax_m3_prefill_metadata
 from .patches.minimax_m3_kv_pool import patch_minimax_m3_kv_pool
@@ -60,6 +61,7 @@ def apply_ascend_patches() -> None:
     patch_ascend_minimax_vector_indexer()
     patch_ascend_minimax_score_buffers()
     patch_ascend_minimax_prefill_causal()
+    patch_ascend_minimax_prefill_future()
     patch_minimax_m3_prefill_metadata()
     patch_minimax_m3_moe_activation()
     patch_minimax_m3_w8a8_moe_offsets()
