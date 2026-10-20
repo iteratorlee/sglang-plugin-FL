@@ -85,3 +85,23 @@ With the official benchmark at C64, output1024 and 8 full-output warmups:
 | 32768 | 64 (screen) | 3242.84 | 5433.20 | 6859.72 | 428.73 |
 
 All profiles use 16 logical NPUs. DP4 passed 14 sequential and 64 concurrent basic semantic checks, and all 630 logged decode batches used graph. Long-input results are screening measurements; final validation with 128 requests remains pending. DP4 improves aggregate throughput, while mean TPOT at 32k increases from DP2's 133.34ms to 159.85ms. These checks do not establish full model precision equivalence.
+
+### Routed EP16 profile
+
+`minimax_m31_ascend_ep16.sh` describes the tested R6 profile for the prepared immutable image `m31-sglang-main-flagos:kv-audit-v2` (`sha256:219459534d6a8e2bf728f056b6cd58f3d5612e02aadaf5ca045fff68b5d8f772`). Attention uses TP4 x DP4; routed MoE uses EP16/TP1; native shared experts use TP1 on their separate stream. Dense MLP remains TP16. The model is the fixed September 29 preview W8A8 checkpoint, not the October 19 Flash checkpoint. The image contains selected plugin changes; the whole current Git HEAD was not deployed.
+
+DeepEP uses `default`/AUTO with INT8 dispatch, ordinary/DeepEP HCCL buffers of 768 MiB and a low-latency dispatch limit of 16. KV is explicitly capped at 477184 tokens per DP, memory fraction .92; CLI chunk 32768 becomes 8192 per DP. Max running requests 68 provides 17 slots per DP with an active limit of 16; the KV budget fits about 14 complete 32k+1k sequences/DP, so long requests can queue. FULL buckets 4/8/12/16, all graph/sampler fences, plugin, FlagGems add whitelist and FlagTree remain enabled. Prefix caching, MTP, mixed chunk and scheduling overlap remain disabled; native shared-expert stream execution remains enabled.
+
+The R6 deployment passed 14 sequential and 64 concurrent basic semantic cases, 64 concurrent sampling cases, three long-retrieval cases, all 16 workers' actual four-bucket FULL execution, 384 official benchmark requests, and a separate active-DECODE/peer-prefill/FULL-recovery check. Timed cases had no JIT compilation or retractions; final health was 200. These checks do not establish full evaluation accuracy or a repeated statistical speedup.
+
+Official SGLang benchmark: client 64, 128 requests/case, 8 short official warmups, temperature 0, seed 42, exact 1024 output tokens. TTFT is seconds and TPOT is milliseconds; both use p50/mean order.
+
+| Input/output | TTFT p50 / mean | TPOT p50 / mean | Total tokens/s | Output tokens/s | Total / logical NPU |
+|---|---:|---:|---:|---:|---:|
+| 4k/1k | 9.218 / 9.068 | 69.435 / 68.988 | 4111.25 | 822.25 | 256.95 |
+| 16k/1k | 28.359 / 28.779 | 94.190 / 93.980 | 8911.24 | 524.19 | 556.95 |
+| 32k/1k | 58.523 / 69.877 | 114.055 / 113.023 | 9988.64 | 302.69 | 624.29 |
+
+This whole deployment measured +9.06%/+19.18%/+9.61% total throughput versus the previous accepted SGLang TP profile. It remains 24.13%/15.73%/23.26% below the fixed vLLM deployment. EP/shared topology, memory capacity and runtime differ, so these are deployment comparisons, not an isolated EP causal effect. Full tables and file hashes are kept in the parent workspace's `docs/opt/20261019-vllm-baseline-followup/25-ep16-results.md` and `EP16_COMPARISON.json`.
+
+Run inside the exact prepared image with 16 logical NPUs and absolute model/log paths. Choose a fresh directory and redirect stdout/stderr to its server log. The portable wrapper adds neutral import paths and an ELF preflight; only its shell syntax and preflight logic were reviewed. The complete model tests used the exact archived R6 launcher, not this wrapper. Changing image, checkpoint, parallel layout or memory settings requires renewed validation.
