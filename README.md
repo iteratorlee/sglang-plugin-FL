@@ -704,6 +704,21 @@ Plugin loads → flag_gems.enable(record=True)
     (excludes internal FlagGems calls from Layer 2 flagos implementations)
 ```
 
+## MiniMax sparse decode on Ascend
+
+The optional `SGLANG_FL_ASCEND_MINIMAX_DECODE_IFA=1` patch uses the installed
+`npu_incre_flash_attention` for plain decode/idle with BF16 QH16/KVH1/D128,
+page size 128, 17 selected slots and graph batch size 16. Smaller graph buckets
+and other shapes keep the original attention implementation. Prefix cache and
+MTP are outside the validated deployment profile.
+
+The fixed 2176-token virtual sequence uses device masks for partial, duplicate,
+invalid and empty selections. Existing graph update, replay and sampler fences
+remain in place. The patch checks exact SGLang/backend/TorchNPU sources and the
+operator ABI; unsupported versions fail during initialization. It is disabled
+by default. Set the flag before starting a new server process; restart the
+process to change it after graphs have been captured.
+
 ## Known Issues
 
 - **Piecewise CUDA Graph not supported**: FlagGems Triton kernels contain `logging.Logger` calls that are incompatible with `torch.compile` (used by SGLang's piecewise CUDA graph). Use `--disable-piecewise-cuda-graph` when launching the server. Regular CUDA graph capture works normally.
