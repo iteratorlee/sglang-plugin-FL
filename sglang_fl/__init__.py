@@ -719,6 +719,11 @@ def activate_platform() -> str | None:
     Returns the fully-qualified class path of PlatformFL if hardware is detected,
     or None if FlagGems DeviceDetector fails (no supported hardware).
     """
+    if os.environ.get("SGLANG_FL_ASCEND_SCHEDULER_CPU_PARTITION") == "1":
+        from sglang_fl.cpu_affinity import install_cpu_affinity_hook
+
+        install_cpu_affinity_hook()
+
     from sglang_fl.utils import get_device_info
 
     info = get_device_info()
@@ -753,6 +758,11 @@ def load_plugin():
 
     Idempotent: safe to call multiple times.
     """
+    if os.environ.get("SGLANG_FL_ASCEND_SCHEDULER_CPU_PARTITION") == "1":
+        from sglang_fl.cpu_affinity import install_cpu_affinity_hook
+
+        install_cpu_affinity_hook()
+
     global _plugin_active, _plugin_loaded
     if _plugin_loaded:
         return
