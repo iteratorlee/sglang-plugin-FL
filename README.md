@@ -719,6 +719,31 @@ operator ABI; unsupported versions fail during initialization. It is disabled
 by default. Set the flag before starting a new server process; restart the
 process to change it after graphs have been captured.
 
+## MiniMax native image preprocessing on Ascend
+
+Set `SGLANG_FL_ASCEND_MINIMAX_NATIVE_IMAGE_RESIZE=1` before starting the
+server to use the native MiniMax image geometry: minimum short side 168,
+ceil alignment to patch size times spatial merge size, and per-image long-side
+caps (`auto`: 2016, `low`: 672, `high`: 3584). An explicit
+`ImageData.max_long_side_pixel` overrides that cap where the input API supports
+it. The current OpenAI image URL schema does not expose that extra field.
+
+The plugin resizes decoded PIL images on the loader's thread pool, disables
+the HF processor's second resize, and derives native token counts from the
+aligned dimensions. This avoids the checkpoint processor's nearest-grid
+rounding and default 672-square area cap. Pure-image preprocessing stays on
+CPU; video and mixed-modality device selection keep their existing behavior.
+Precomputed feature dictionaries are preserved. Existing image framing and
+grid-aware visual-cache identities remain active.
+
+The default is off. The native geometry matched all 149 ERQA cases with
+available original images against the NV reference's image-token usage;
+18 real single/multi-image cases also matched an independent PIL/HF CPU
+reference for pixels, grids, string/native token prompts and NV prompt lengths.
+These are input-contract checks, not a claim of full ERQA score recovery.
+Higher-resolution inputs consume more context and prefill work; keep each
+request's input plus output budget within the configured context length.
+
 ## Known Issues
 
 - **Piecewise CUDA Graph not supported**: FlagGems Triton kernels contain `logging.Logger` calls that are incompatible with `torch.compile` (used by SGLang's piecewise CUDA graph). Use `--disable-piecewise-cuda-graph` when launching the server. Regular CUDA graph capture works normally.
