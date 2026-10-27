@@ -15,6 +15,7 @@ import torch
 
 import sglang_fl
 from sglang_fl import native
+from sglang_fl import native_identity
 from sglang_fl.distributed.device_communicators import flagcx
 
 
@@ -46,9 +47,16 @@ def environment(monkeypatch, tmp_path):
     monkeypatch.setattr(
         native.metadata,
         "version",
-        lambda name: (native.FLAGTREE_VERSION if name == "flagtree" else "test-gems"),
+        lambda name: "test-gems",
     )
-    monkeypatch.setitem(sys.modules, "triton", SimpleNamespace(__version__="3.5.1"))
+    monkeypatch.setattr(
+        native_identity,
+        "validate_flagtree",
+        lambda: {
+            "flagtree": "0.7.0+ascend3.5",
+            "triton_module": "3.5.1",
+        },
+    )
     return tmp_path
 
 
@@ -74,14 +82,12 @@ def test_reject_scope_expansion(environment, monkeypatch, key, value):
 
 def test_versions_and_build_artifacts(environment, monkeypatch):
     assert native.validate_environment()[0]["flagtree"] == "0.7.0+ascend3.5"
-    monkeypatch.setattr(native.metadata, "version", lambda name: "0.7.0rc3+ascend3.5")
-    with pytest.raises(RuntimeError, match="Expected flagtree"):
-        native.validate_environment()
-
-
-def test_reject_wrong_triton_module(environment, monkeypatch):
-    monkeypatch.setitem(sys.modules, "triton", SimpleNamespace(__version__="3.2.0"))
-    with pytest.raises(RuntimeError, match="triton module"):
+    monkeypatch.setattr(
+        native_identity,
+        "validate_flagtree",
+        Mock(side_effect=RuntimeError("identity rejected")),
+    )
+    with pytest.raises(RuntimeError, match="identity rejected"):
         native.validate_environment()
 
 
@@ -313,7 +319,7 @@ def test_tensor_gather_scatter_and_teardown(routed):
     assert group._all_gather_into_tensor(gathered, input=data) is None
     torch.testing.assert_close(gathered.data, torch.cat((data.data, data.data + 10)))
     reduced = Tensor(torch.empty(3))
-    assert group._reduce_scatter_tensor(reduced, input=data) is None
+    assert group._reduce_scatter_tensor(reduced, input=data) is reduced
     torch.testing.assert_close(reduced.data, data.data[:3] * 2)
     group.destroy()
     assert api.calls[-2:] == [("destroy", 17), ("native_destroy",)]
@@ -460,3 +466,18 @@ def test_reference_sg_signatures_and_npu_routing(monkeypatch, routed):
     assert scope["all_reduce"](group, x) is x
     assert x.data.item() == 6.0
     assert api.calls[0][0] == "ar"
+    method = next(
+        n
+        for n in coordinator.body
+        if isinstance(n, ast.FunctionDef) and n.name == "_reduce_scatter_tensor"
+    )
+    scope = {
+        "torch": SimpleNamespace(
+            Tensor=torch.Tensor,
+            distributed=SimpleNamespace(reduce_scatter_tensor=Mock()),
+        )
+    }
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), scope)
+    output = Tensor(torch.empty(1))
+    group.pynccl_comm, group.device_group = None, "native_device_group"
+    assert scope["_reduce_scatter_tensor"](group, output, x) is output

@@ -29,6 +29,25 @@ and a source-tree FlagCX CAPI build (recommended `v0.13.0`) containing
 Installing a FlagCX Torch plugin alone does not activate this transport.
 Sources belong under `/sgl-workspace`; keep the native Torch/CANN versions.
 
+Official FlagTree wheels must match the exact version above; the loaded Triton
+module and extension must belong to that distribution and match its RECORD
+hashes. For an editable FlagTree build, also set
+`SGLANG_FL_FLAGTREE_SOURCE=/sgl-workspace/FlagTree`,
+`SGLANG_FL_EXPECT_FLAGTREE_COMMIT=2b5b81320c18dbf4008cf6ad14d3c246bd74f7ff`, and
+`SGLANG_FL_EXPECT_FLAGTREE_VERSION` to the exact version observed after building.
+The validator requires editable `direct_url.json`, that clean pinned checkout,
+and loaded module/extension paths inside it. No version-prefix bypass is used.
+The source build backend selector is `FLAGTREE_BACKEND=ascend`.
+
+The standalone NPU acceptance probe is
+`tests/manual/native_npu_collectives.py`, run with `torchrun` in a separate
+candidate job. Supply `--groups-file` containing the original role's exact `tp`
+and `attention_tp` rank partitions, `--proof-dir` for separate smoke evidence,
+and `--mode both`. It verifies rank-coded eager results and three graph replays
+with changed inputs through real SGGroup and NpuCommunicator methods. It never
+loads a model or selects a new platform. See its `--help`; no NPU probe runs as
+part of the CPU unit suite.
+
 Per-process JSONL proof distinguishes `plugin_ready`, `communicator_ready` and
 `collective_submitted`. Only the last follows successful C API submission;
 constructor warmup is excluded. Submission is not stream completion or graph

@@ -20,8 +20,6 @@ from pathlib import Path
 import torch
 
 logger = logging.getLogger(__name__)
-FLAGTREE_VERSION = "0.7.0+ascend3.5"
-TRITON_VERSION = "3.5.1"
 GROUPS = frozenset(("tp", "attention_tp"))
 
 
@@ -57,19 +55,10 @@ def validate_environment():
             )
     if os.environ.get("SGLANG_FL_SGL_KERNEL_WARMUP_COMPAT", "0") not in ("0", "1"):
         raise ValueError("SGLANG_FL_SGL_KERNEL_WARMUP_COMPAT must be 0 or 1")
-    versions = {name: metadata.version(name) for name in ("flagtree", "flag-gems")}
-    if versions["flagtree"] != FLAGTREE_VERSION:
-        raise RuntimeError(
-            f"Expected flagtree=={FLAGTREE_VERSION}, got {versions['flagtree']}"
-        )
-    # FlagTree can own the triton module without a separate 'triton' distribution.
-    import triton
+    from sglang_fl.native_identity import validate_flagtree
 
-    versions["triton_module"] = triton.__version__
-    if triton.__version__ != TRITON_VERSION:
-        raise RuntimeError(
-            f"Expected triton module {TRITON_VERSION}, got {triton.__version__}"
-        )
+    versions = validate_flagtree()
+    versions["flag-gems"] = metadata.version("flag-gems")
     root = Path(os.environ.get("FLAGCX_PATH", ""))
     if not os.environ.get("FLAGCX_PATH") or not root.is_absolute():
         raise ValueError(
@@ -230,6 +219,7 @@ def install_collectives(cls, factory=None):
             raise ValueError("FlagCX reduce-scatter requires equal splits")
         _check_output(output, input, input.numel() // self.world_size)
         comm.reduce_scatter(output, input)
+        return output
 
     def all_gather(self, input_, dim=-1, output_tensor_list=None):
         # List output is deliberately native (including its None return value).
