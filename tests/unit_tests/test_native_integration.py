@@ -17,6 +17,7 @@ import torch
 import sglang_fl
 from sglang_fl import flagtree_driver
 from sglang_fl import native
+from sglang_fl import native_allocator_warmup
 from sglang_fl import native_identity
 from sglang_fl import native_registration
 from sglang_fl.distributed.device_communicators import flagcx
@@ -24,6 +25,11 @@ from sglang_fl.distributed.device_communicators import flagcx
 
 @pytest.fixture(autouse=True)
 def clean_environment(monkeypatch):
+    # The source guard has its own real-source CPU contracts. These routing
+    # tests intentionally use the seven-file SG integration snapshots.
+    monkeypatch.setattr(
+        native_allocator_warmup, "configure", Mock(return_value={"status": "requested"})
+    )
     for key in tuple(os.environ):
         if (
             key.startswith(("SGLANG_FL_", "SGLANG_FLAGGEMS_"))
