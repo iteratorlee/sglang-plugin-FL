@@ -65,6 +65,15 @@ def _import_flagcx_wrapper():
         flagcxUniqueId,
     )
 
+    if os.getenv("SGLANG_FL_INTEGRATION") == "native":
+        wrapper = sys.modules["plugin.interservice.flagcx_wrapper"]
+        expected = os.path.realpath(
+            os.path.join(flagcx_path, "plugin/interservice/flagcx_wrapper.py")
+        )
+        actual = os.path.realpath(getattr(wrapper, "__file__", ""))
+        if actual != expected:
+            raise RuntimeError(f"FlagCX wrapper path mismatch: {actual} != {expected}")
+
     return (
         FLAGCXLibrary,
         buffer_type,
@@ -162,9 +171,9 @@ class FlagCXCommunicator:
             )
             # Warmup: small all_reduce to ensure comm is ready
             warmup_data = torch.zeros(1, device=self.device)
-            self._flagcx_all_reduce(warmup_data)
+            warmup_result = self._flagcx_all_reduce(warmup_data)
             self._sync_current_stream()
-            del warmup_data
+            del warmup_data, warmup_result
 
         self.available = True
         self.disabled = False
@@ -230,7 +239,15 @@ class FlagCXCommunicator:
             self.comm,
             flagcx_stream,
         )
+        self._observe_collective("flagcxAllReduce", tensor)
         return out_tensor
+
+    def _observe_collective(self, api, tensor):
+        # Called only after the checked C API wrapper returned successfully.
+        # Native mode attaches this after warmup, so import/init is not proof.
+        observer = getattr(self, "_collective_observer", None)
+        if observer is not None:
+            observer(api, tensor)
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         """All-reduce using FlagCX. Falls back to torch.distributed if disabled."""
@@ -263,6 +280,7 @@ class FlagCXCommunicator:
             self.comm,
             flagcx_stream,
         )
+        self._observe_collective("flagcxReduceScatter", input_)
 
     def all_gather(self, output: torch.Tensor, input_: torch.Tensor):
         """All-gather using FlagCX."""
@@ -281,6 +299,7 @@ class FlagCXCommunicator:
             self.comm,
             flagcx_stream,
         )
+        self._observe_collective("flagcxAllGather", input_)
 
     def reduce_scatterv(
         self,
@@ -414,8 +433,8 @@ class FlagCXCommunicator:
         """End a group of collective operations."""
         self.flagcx.flagcxGroupEnd(self.comm)
 
-    def __del__(self):
-        """Free cached streams and destroy the FlagCX comm on GC / interpreter shutdown."""
+    def close(self):
+        """Release transport resources; native mode calls this before group teardown."""
         # self.flagcx may be missing (early-disabled path) or unusable (shutdown).
         flagcx = getattr(self, "flagcx", None)
         if flagcx is None:
@@ -435,6 +454,11 @@ class FlagCXCommunicator:
             except Exception:
                 pass
             self.comm = None
+        self.disabled = True
+        self.available = False
+
+    def __del__(self):
+        self.close()
 
 
 def create_flagcx_communicator(group, device) -> FlagCXCommunicator:

@@ -710,6 +710,10 @@ def activate_platform() -> str | None:
     Returns the fully-qualified class path of PlatformFL if hardware is detected,
     or None if FlagGems DeviceDetector fails (no supported hardware).
     """
+    # Native integration must not change SG's platform/kernel selection.
+    if os.environ.get("SGLANG_FL_INTEGRATION", "full") == "native":
+        return None
+
     from sglang_fl.utils import get_device_info
 
     info = get_device_info()
@@ -745,6 +749,23 @@ def load_plugin():
     Idempotent: safe to call multiple times.
     """
     global _plugin_active, _plugin_loaded
+    mode = os.environ.get("SGLANG_FL_INTEGRATION", "full")
+    if mode not in ("full", "native"):
+        raise SystemExit(f"Unknown SGLANG_FL_INTEGRATION={mode!r}")
+    if mode == "native":
+        if _plugin_active:
+            return
+        _plugin_loaded = True
+        try:
+            from sglang_fl.native import load_native_plugin
+
+            load_native_plugin()
+        except Exception as exc:
+            # SG logs and swallows Exception from general plugins. An explicitly
+            # requested native integration must not silently run without it.
+            raise SystemExit(f"sglang_fl native activation failed: {exc}") from exc
+        _plugin_active = True
+        return
     if _plugin_loaded:
         return
     _plugin_loaded = True

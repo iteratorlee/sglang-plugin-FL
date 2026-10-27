@@ -2,6 +2,44 @@
 
 sglang-plugin-FL is an out-of-tree (OOT) plugin for [SGLang](https://github.com/sgl-project/sglang), built on FlagOS's unified multi-chip backend — including the unified operator library [FlagGems](https://github.com/flagos-ai/FlagGems) and the unified communication library [FlagCX](https://github.com/flagos-ai/FlagCX). It extends SGLang's inference capabilities across diverse hardware platforms. Without changing SGLang's original interfaces or usage patterns, the same command can run model inference on different chips.
 
+## Native Ascend integration
+
+For an existing native GLM deployment, select `SGLANG_FL_INTEGRATION=native`
+**before Python starts**. This opt-in mode preserves SG's native platform,
+model, attention, quantization, cache, DeepEP and Mooncake paths. It enables
+only FlagGems `ones` and dense FlagCX collectives in NPU `tp` / `attention_tp`
+groups. Other groups, direct `torch.distributed` calls, quantized and variable
+collectives remain native. The default `full` mode described below is unchanged.
+
+```bash
+python -m pip install -e /sgl-workspace/sglang-plugin-FL --no-deps --no-build-isolation
+export SGLANG_FL_INTEGRATION=native SGLANG_PLUGINS=sglang_fl
+unset SGLANG_PLATFORM SGLANG_FL_FLAGOS_BLACKLIST
+export USE_FLAGGEMS=1 SGLANG_FL_FLAGOS_WHITELIST=ones
+export SGLANG_FL_OOT_ENABLED=0 SGLANG_FL_DISAGG_FLAGCX=0
+export SGLANG_FL_DIST_BACKEND=hccl FLAGCX_PATH=/sgl-workspace/FlagCX
+export SGLANG_FL_PROOF_DIR=/sgl-workspace/flagos-proof
+export SGLANG_FLAGGEMS_RECORD=1 SGLANG_FLAGGEMS_LOG_ONCE=1
+python -m sglang.launch_server <unchanged-native-role-arguments>
+```
+
+Requires FlagTree `0.7.0+ascend3.5` (imported Triton `3.5.1`), editable FlagGems,
+and a source-tree FlagCX CAPI build (recommended `v0.13.0`) containing
+`build/lib/libflagcx.so` and `plugin/interservice/flagcx_wrapper.py`.
+Installing a FlagCX Torch plugin alone does not activate this transport.
+Sources belong under `/sgl-workspace`; keep the native Torch/CANN versions.
+
+Per-process JSONL proof distinguishes `plugin_ready`, `communicator_ready` and
+`collective_submitted`. Only the last follows successful C API submission;
+constructor warmup is excluded. Submission is not stream completion or graph
+replay evidence: validate synchronized results and real serving profiler traces.
+Failed required transports abort instead of silently falling back.
+
+If the old SGKernel `add_rmsnorm_bias` launch fails with missing constexpr
+arguments on FlagTree 3.5, set `SGLANG_FL_SGL_KERNEL_WARMUP_COMPAT=1` before
+startup. This optional plugin shim adapts only that JIT object's compiled launch
+ABI and writes no package files. Default is `0`; no global Triton patch is used.
+
 ## Overview
 
 SGLang's inference engine relies on NVIDIA-specific components: flashinfer for attention, sgl_kernel for fused CUDA kernels, and NCCL for distributed communication. Running on alternative hardware (Huawei Ascend, Cambricon MLU, Iluvatar, etc.) would otherwise require invasive source modifications.
