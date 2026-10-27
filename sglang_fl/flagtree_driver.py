@@ -50,20 +50,22 @@ class _CachedDriverUtils:
             return instance.__dict__["utils"]
 
 
-def patch_flagtree_driver_utils() -> None:
+def patch_flagtree_driver_utils() -> str:
     """Patch the registry class without activating a driver or initializing NPU."""
     try:
         if version("flagtree") != "0.6.0+ascend3.2":
-            return
+            return "not_applicable_version"
         from triton.backends import backends
     except (PackageNotFoundError, ImportError):
-        return
+        return "unavailable"
 
     backend = backends.get("ascend")
     if backend is None:
-        return
+        return "backend_missing"
     driver = backend.driver
     utils = vars(driver).get("utils")
+    if isinstance(utils, _CachedDriverUtils):
+        return "already_cached"
     if (
         driver.__name__ != "NPUDriver"
         or not isinstance(utils, property)
@@ -73,9 +75,10 @@ def patch_flagtree_driver_utils() -> None:
         or getattr(getattr(utils.fget, "__code__", None), "co_names", ())
         != ("NPUUtils",)
     ):
-        return
+        return "not_applicable_layout"
 
     # Triton loads this class dynamically as ascend.NPUDriver. The ordinary
     # triton.backends.ascend.driver import can refer to a different class.
     driver.utils = _CachedDriverUtils(utils.fget)
     logger.info("Ascend FlagTree driver utils cache patch applied")
+    return "applied"

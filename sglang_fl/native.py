@@ -267,6 +267,11 @@ def install_collectives(cls, factory=None):
 
 def load_native_plugin():
     versions, files = validate_environment()
+    # Invoke the same narrow helper as legacy mode without importing dispatch
+    # or vendor patches. The pinned 0.7.0 driver already caches utils eagerly.
+    from sglang_fl.flagtree_driver import patch_flagtree_driver_utils
+
+    driver_utils_cache = patch_flagtree_driver_utils()
     if os.environ.get("SGLANG_FL_SGL_KERNEL_WARMUP_COMPAT", "0") == "1":
         from sglang_fl.native_warmup import install
 
@@ -292,6 +297,7 @@ def load_native_plugin():
         "plugin_ready",
         integration="native",
         versions=versions,
+        driver_utils_cache=driver_utils_cache,
         aten_allowlist=["ones"],
         aten_registrations=registration.registered,
         groups=sorted(GROUPS),

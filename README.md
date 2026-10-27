@@ -39,6 +39,13 @@ The validator requires editable `direct_url.json`, that clean pinned checkout,
 and loaded module/extension paths inside it. No version-prefix bypass is used.
 The source build backend selector is `FLAGTREE_BACKEND=ascend`.
 
+Both native and full modes invoke the isolated FlagTree driver-utils cache hook.
+It only changes the lazy `NPUDriver.utils` property in `0.6.0+ascend3.2`, caching
+its result per driver instance with thread/fork-safe first initialization.
+The pinned `0.7.0+ascend3.5` driver already stores utils in its constructor;
+native proof reports `plugin_ready.driver_utils_cache=not_applicable_version`.
+This does not relax native version validation or change kernels or tensor caches.
+
 The standalone NPU acceptance probe is
 `tests/manual/native_npu_collectives.py`, run with `torchrun` in a separate
 candidate job. Supply `--groups-file` containing the original role's exact `tp`

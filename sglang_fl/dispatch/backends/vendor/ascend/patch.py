@@ -10,8 +10,9 @@ Huawei NPU:
 
 import logging
 
+from sglang_fl.flagtree_driver import patch_flagtree_driver_utils
+
 from .patches.attention_registry import patch_attn_backend_wrapper
-from .patches.flagtree_driver import patch_flagtree_driver_utils
 from .patches.qwen_vl_processor import patch_qwen_vl_processor
 from .patches.scheduler_pp import (
     patch_pp_launch_batch_sync,

@@ -1,6 +1,7 @@
 """CPU-only routing/ABI contracts; no claim of real NPU execution."""
 
 import ast
+import builtins
 import ctypes
 import inspect
 import json
@@ -14,6 +15,7 @@ import pytest
 import torch
 
 import sglang_fl
+from sglang_fl import flagtree_driver
 from sglang_fl import native
 from sglang_fl import native_identity
 from sglang_fl import native_registration
@@ -133,6 +135,9 @@ def test_failure_escapes_sg_exception_handler_and_can_retry(monkeypatch):
 
 
 def test_only_ones_and_no_yaml_policy(environment, monkeypatch):
+    monkeypatch.setattr(flagtree_driver, "version", lambda name: "0.7.0+ascend3.5")
+    cache_hook = Mock(wraps=flagtree_driver.patch_flagtree_driver_utils)
+    monkeypatch.setattr(flagtree_driver, "patch_flagtree_driver_utils", cache_hook)
     library = Mock()
     constructor = Mock(return_value=library)
     monkeypatch.setattr(native_registration.torch.library, "Library", constructor)
@@ -149,9 +154,38 @@ def test_only_ones_and_no_yaml_policy(environment, monkeypatch):
         "sglang.srt.distributed.parallel_state",
         SimpleNamespace(GroupCoordinator=object),
     )
-    monkeypatch.setattr(native, "install_collectives", Mock())
+    install, emit = Mock(), Mock()
+    monkeypatch.setattr(native, "install_collectives", install)
+    monkeypatch.setattr(native, "_emit", emit)
     monkeypatch.setenv("SGLANG_FL_CONFIG", "/must/not/read.yaml")
-    native.load_native_plugin()
+    original_import = builtins.__import__
+
+    def scoped_import(name, *args, **kwargs):
+        # Exercise the real entrypoint and cache helper. Neither may activate
+        # legacy patches or initialize a driver for the pinned 0.7 wheel.
+        assert not name.startswith(
+            (
+                "sglang_fl.dispatch",
+                "sglang_fl.platform",
+                "sglang.srt.models",
+                "sglang.srt.layers",
+                "triton.backends",
+            )
+        ), name
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", scoped_import)
+    assert sglang_fl.activate_platform() is None
+    sglang_fl.load_plugin()
+    sglang_fl.load_plugin()
+    assert sglang_fl.is_plugin_active()
+    cache_hook.assert_called_once_with()
+    install.assert_called_once_with(object)
+    emit.assert_called_once()
+    assert emit.call_args.args == ("plugin_ready",)
+    assert emit.call_args.kwargs["driver_utils_cache"] == "not_applicable_version"
+    assert emit.call_args.kwargs["aten_allowlist"] == ["ones"]
+    assert emit.call_args.kwargs["groups"] == ["attention_tp", "tp"]
     audited = native_registration._libraries[0]
     constructor.assert_called_once_with("aten", "IMPL")
     gems.only_enable.assert_called_once_with(
@@ -159,6 +193,20 @@ def test_only_ones_and_no_yaml_policy(environment, monkeypatch):
     )
     library.impl.assert_called_once_with("ones", fn, "PrivateUse1")
     gems.enable.assert_not_called()
+
+
+def test_cache_hook_cannot_bypass_native_identity_gate(environment, monkeypatch):
+    monkeypatch.setattr(
+        native_identity,
+        "validate_flagtree",
+        Mock(side_effect=RuntimeError("identity rejected")),
+    )
+    cache_hook = Mock()
+    monkeypatch.setattr(flagtree_driver, "patch_flagtree_driver_utils", cache_hook)
+    with pytest.raises(SystemExit, match="identity rejected"):
+        sglang_fl.load_plugin()
+    cache_hook.assert_not_called()
+    assert not sglang_fl.is_plugin_active()
 
 
 def test_swallowed_gems_registration_failure_cannot_report_plugin_ready(

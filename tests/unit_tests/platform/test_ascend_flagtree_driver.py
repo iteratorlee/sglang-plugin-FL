@@ -22,7 +22,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from sglang_fl.dispatch.backends.vendor.ascend.patches import flagtree_driver as patch
+from sglang_fl import flagtree_driver as patch
 
 
 @pytest.fixture
@@ -52,9 +52,9 @@ def registry(monkeypatch):
 
 def test_lazy_registry_patch_is_idempotent(registry):
     original = registry.alias.utils
-    patch.patch_flagtree_driver_utils()
+    assert patch.patch_flagtree_driver_utils() == "applied"
     descriptor = registry.driver.utils
-    patch.patch_flagtree_driver_utils()
+    assert patch.patch_flagtree_driver_utils() == "already_cached"
     assert registry.driver.utils is descriptor
     assert registry.alias.utils is original
     assert registry.calls == []
@@ -72,7 +72,37 @@ def test_concurrent_first_access_initializes_once(registry):
     assert all(value is values[0] for value in values)
 
 
-@pytest.mark.parametrize("version", [None, "0.6.0", "0.7.0+ascend3.2"])
+def test_cache_is_per_driver_instance(registry):
+    patch.patch_flagtree_driver_utils()
+    first, second = registry.driver(), registry.driver()
+    assert first.utils is first.utils
+    assert second.utils is second.utils
+    assert first.utils is not second.utils
+    assert len(registry.calls) == 2
+
+
+def test_pinned_07_eager_utils_remain_unchanged(registry, monkeypatch):
+    # Official 2b5b813 NPUDriver already assigns NPUUtils() in __init__.
+    # The cache helper must not replace that constructor or touch the registry.
+    class NPUDriver:
+        def __init__(self):
+            self.utils = NPUUtils()  # noqa: F821 - provided by the fixture
+
+    registry.module.backends["ascend"] = SimpleNamespace(driver=NPUDriver)
+    monkeypatch.setattr(patch, "version", lambda name: "0.7.0+ascend3.5")
+    original = dict(vars(NPUDriver))
+    assert patch.patch_flagtree_driver_utils() == "not_applicable_version"
+    assert dict(vars(NPUDriver)) == original
+    assert registry.calls == []
+    driver = NPUDriver()
+    for _ in range(10):
+        assert driver.utils is registry.calls[0]
+    assert len(registry.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "version", [None, "0.6.0", "0.7.0+ascend3.2", "0.7.0+ascend3.5", "0.7.1a1"]
+)
 def test_unaffected_or_missing_distribution_is_untouched(
     registry, monkeypatch, version
 ):
@@ -84,7 +114,8 @@ def test_unaffected_or_missing_distribution_is_untouched(
         return version
 
     monkeypatch.setattr(patch, "version", get_version)
-    patch.patch_flagtree_driver_utils()
+    result = patch.patch_flagtree_driver_utils()
+    assert result == ("unavailable" if version is None else "not_applicable_version")
     assert registry.driver.utils is original
     assert registry.calls == []
 
@@ -106,7 +137,9 @@ def test_other_driver_layouts_are_untouched(registry, layout):
     else:
         registry.driver.utils = registry.driver.utils.setter(lambda self, value: None)
     original = vars(registry.driver).get("utils")
-    patch.patch_flagtree_driver_utils()
+    assert patch.patch_flagtree_driver_utils() == (
+        "backend_missing" if layout == "missing" else "not_applicable_layout"
+    )
     assert vars(registry.driver).get("utils") is original
     assert registry.calls == []
 
