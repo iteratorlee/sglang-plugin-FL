@@ -11,6 +11,17 @@ only FlagGems `ones` and dense FlagCX collectives in NPU `tp` / `attention_tp`
 groups. Other groups, direct `torch.distributed` calls, quantized and variable
 collectives remain native. The default `full` mode described below is unchanged.
 
+Set `SGLANG_FL_FLAGCX_ENABLED=0` before startup to enable this native plugin with
+Gems/FlagTree while preserving all original SG/HCCL collectives. Only exact `0`
+or `1` is accepted; the default is `1` (both TP groups use FlagCX as above).
+With `0`, no FlagCX path, binary, wrapper or installation is required, and the
+plugin neither imports GroupCoordinator nor installs collective hooks.
+Strict FlagTree validation, audited ONLY-ones registration, the driver-utils
+cache helper and the optional SGKernel warmup shim still run.
+Proof reports `flagcx_enabled=false`, `groups=[]`, and `files={}`. This is an
+explicit startup configuration; enabled-mode transport failures still abort.
+Restart workers to change the setting; it does not remove already installed hooks.
+
 ```bash
 python -m pip install -e /sgl-workspace/sglang-plugin-FL --no-deps --no-build-isolation
 export SGLANG_FL_INTEGRATION=native SGLANG_PLUGINS=sglang_fl

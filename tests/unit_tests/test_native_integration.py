@@ -78,7 +78,9 @@ def environment(monkeypatch, tmp_path):
         ("SGLANG_FL_DISAGG_FLAGCX", "1"),
     ],
 )
-def test_reject_scope_expansion(environment, monkeypatch, key, value):
+@pytest.mark.parametrize("flagcx_enabled", ["0", "1"])
+def test_reject_scope_expansion(environment, monkeypatch, key, value, flagcx_enabled):
+    monkeypatch.setenv("SGLANG_FL_FLAGCX_ENABLED", flagcx_enabled)
     monkeypatch.setenv(key, value)
     with pytest.raises(ValueError, match=key):
         native.validate_environment()
@@ -101,8 +103,12 @@ def test_torch_plugin_import_is_not_a_capi_build(environment):
         native.validate_environment()
 
 
-def test_native_entrypoint_does_not_activate_platform_or_full_layers(monkeypatch):
+@pytest.mark.parametrize("flagcx_enabled", ["0", "1"])
+def test_native_entrypoint_does_not_activate_platform_or_full_layers(
+    monkeypatch, flagcx_enabled
+):
     monkeypatch.setenv("SGLANG_FL_INTEGRATION", "native")
+    monkeypatch.setenv("SGLANG_FL_FLAGCX_ENABLED", flagcx_enabled)
     setup = Mock()
     monkeypatch.setattr(native, "load_native_plugin", setup)
     for name in (
@@ -134,7 +140,14 @@ def test_failure_escapes_sg_exception_handler_and_can_retry(monkeypatch):
     assert sglang_fl.is_plugin_active()
 
 
-def test_only_ones_and_no_yaml_policy(environment, monkeypatch):
+@pytest.mark.parametrize("flagcx_enabled", [None, "0", "1"])
+def test_only_ones_and_no_yaml_policy(environment, monkeypatch, flagcx_enabled):
+    if flagcx_enabled is not None:
+        monkeypatch.setenv("SGLANG_FL_FLAGCX_ENABLED", flagcx_enabled)
+    if flagcx_enabled == "0":
+        monkeypatch.delenv("FLAGCX_PATH")
+        (environment / "build/lib/libflagcx.so").unlink()
+        (environment / "plugin/interservice/flagcx_wrapper.py").unlink()
     monkeypatch.setattr(flagtree_driver, "version", lambda name: "0.7.0+ascend3.5")
     cache_hook = Mock(wraps=flagtree_driver.patch_flagtree_driver_utils)
     monkeypatch.setattr(flagtree_driver, "patch_flagtree_driver_utils", cache_hook)
@@ -172,6 +185,15 @@ def test_only_ones_and_no_yaml_policy(environment, monkeypatch):
                 "triton.backends",
             )
         ), name
+        if flagcx_enabled == "0":
+            assert not name.startswith(
+                (
+                    "sglang.srt.distributed",
+                    "sglang_fl.distributed",
+                    "plugin.interservice",
+                    "flagcx",
+                )
+            ), name
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", scoped_import)
@@ -180,12 +202,20 @@ def test_only_ones_and_no_yaml_policy(environment, monkeypatch):
     sglang_fl.load_plugin()
     assert sglang_fl.is_plugin_active()
     cache_hook.assert_called_once_with()
-    install.assert_called_once_with(object)
+    if flagcx_enabled == "0":
+        install.assert_not_called()
+    else:
+        install.assert_called_once_with(object)
     emit.assert_called_once()
     assert emit.call_args.args == ("plugin_ready",)
     assert emit.call_args.kwargs["driver_utils_cache"] == "not_applicable_version"
     assert emit.call_args.kwargs["aten_allowlist"] == ["ones"]
-    assert emit.call_args.kwargs["groups"] == ["attention_tp", "tp"]
+    assert emit.call_args.kwargs["flagcx_enabled"] is (flagcx_enabled != "0")
+    assert emit.call_args.kwargs["groups"] == (
+        [] if flagcx_enabled == "0" else ["attention_tp", "tp"]
+    )
+    if flagcx_enabled == "0":
+        assert emit.call_args.kwargs["files"] == {}
     audited = native_registration._libraries[0]
     constructor.assert_called_once_with("aten", "IMPL")
     gems.only_enable.assert_called_once_with(
@@ -195,7 +225,11 @@ def test_only_ones_and_no_yaml_policy(environment, monkeypatch):
     gems.enable.assert_not_called()
 
 
-def test_cache_hook_cannot_bypass_native_identity_gate(environment, monkeypatch):
+@pytest.mark.parametrize("flagcx_enabled", ["0", "1"])
+def test_cache_hook_cannot_bypass_native_identity_gate(
+    environment, monkeypatch, flagcx_enabled
+):
+    monkeypatch.setenv("SGLANG_FL_FLAGCX_ENABLED", flagcx_enabled)
     monkeypatch.setattr(
         native_identity,
         "validate_flagtree",
@@ -209,9 +243,11 @@ def test_cache_hook_cannot_bypass_native_identity_gate(environment, monkeypatch)
     assert not sglang_fl.is_plugin_active()
 
 
+@pytest.mark.parametrize("flagcx_enabled", ["0", "1"])
 def test_swallowed_gems_registration_failure_cannot_report_plugin_ready(
-    environment, monkeypatch
+    environment, monkeypatch, flagcx_enabled
 ):
+    monkeypatch.setenv("SGLANG_FL_FLAGCX_ENABLED", flagcx_enabled)
     library = Mock()
     library.impl.side_effect = RuntimeError("dispatcher rejected registration")
     monkeypatch.setattr(
@@ -242,6 +278,64 @@ def test_swallowed_gems_registration_failure_cannot_report_plugin_ready(
     assert not sglang_fl.is_plugin_active()
     install.assert_not_called()
     emit.assert_not_called()
+
+
+@pytest.mark.parametrize("value", ["", "2", "true", "false", "01", " 0 "])
+def test_flagcx_switch_is_strict(environment, monkeypatch, value):
+    monkeypatch.setenv("SGLANG_FL_FLAGCX_ENABLED", value)
+    with pytest.raises(SystemExit, match="SGLANG_FL_FLAGCX_ENABLED"):
+        sglang_fl.load_plugin()
+    assert not sglang_fl.is_plugin_active()
+
+
+@pytest.mark.parametrize("path", [None, "relative/not-installed", "/not-installed"])
+def test_flagcx_disabled_needs_no_path_or_artifact_checks(
+    environment, monkeypatch, path
+):
+    monkeypatch.setenv("SGLANG_FL_FLAGCX_ENABLED", "0")
+    if path is None:
+        monkeypatch.delenv("FLAGCX_PATH")
+    else:
+        monkeypatch.setenv("FLAGCX_PATH", path)
+    monkeypatch.setattr(native, "Path", Mock(side_effect=AssertionError("FlagCX path")))
+    version = Mock(return_value="test-gems")
+    monkeypatch.setattr(native.metadata, "version", version)
+    versions, files = native.validate_environment()
+    version.assert_called_once_with("flag-gems")
+    assert files == []
+    assert versions["flagtree"] == "0.7.0+ascend3.5"
+    assert versions["flag-gems"] == "test-gems"
+
+
+def test_flagcx_disabled_preserves_warmup_shim(environment, monkeypatch):
+    monkeypatch.setenv("SGLANG_FL_FLAGCX_ENABLED", "0")
+    monkeypatch.setenv("SGLANG_FL_SGL_KERNEL_WARMUP_COMPAT", "1")
+    warmup = Mock()
+    monkeypatch.setitem(
+        sys.modules, "sglang_fl.native_warmup", SimpleNamespace(install=warmup)
+    )
+    library = Mock()
+    monkeypatch.setattr(
+        native_registration.torch.library, "Library", lambda *a: library
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "flag_gems",
+        SimpleNamespace(
+            only_enable=lambda lib, **kw: lib.impl("ones", Mock(), "PrivateUse1")
+        ),
+    )
+    install, emit = Mock(), Mock()
+    monkeypatch.setattr(native, "install_collectives", install)
+    monkeypatch.setattr(native, "_emit", emit)
+    sglang_fl.load_plugin()
+    warmup.assert_called_once_with()
+    install.assert_not_called()
+    assert [call.args[0] for call in emit.call_args_list] == [
+        "warmup_compat_ready",
+        "plugin_ready",
+    ]
+    assert emit.call_args.kwargs["flagcx_enabled"] is False
 
 
 NPU = SimpleNamespace(type="npu", index=0)

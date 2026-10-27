@@ -1,6 +1,6 @@
 """Opt-in FlagOS integration preserving SGLang's native model implementation.
 
-Only FlagGems ``ones`` and dense TP/attention-TP collectives are replaced.
+Only FlagGems ``ones`` and optionally dense TP/attention-TP collectives are replaced.
 No platform, model, quantization, FLA, cache, MoE, or PD-transfer patches.
 """
 
@@ -35,8 +35,16 @@ def _emit(event, **fields):
             stream.write(line + "\n")
 
 
+def _flagcx_enabled():
+    value = os.environ.get("SGLANG_FL_FLAGCX_ENABLED", "1")
+    if value not in ("0", "1"):
+        raise ValueError("SGLANG_FL_FLAGCX_ENABLED must be exactly 0 or 1")
+    return value == "1"
+
+
 def validate_environment():
     """Fail before installing any hook or operator if the scope is ambiguous."""
+    flagcx_enabled = _flagcx_enabled()
     expected = {
         "USE_FLAGGEMS": "1",
         "SGLANG_FL_FLAGOS_WHITELIST": "ones",
@@ -59,6 +67,8 @@ def validate_environment():
 
     versions = validate_flagtree()
     versions["flag-gems"] = metadata.version("flag-gems")
+    if not flagcx_enabled:
+        return versions, []
     root = Path(os.environ.get("FLAGCX_PATH", ""))
     if not os.environ.get("FLAGCX_PATH") or not root.is_absolute():
         raise ValueError(
@@ -266,6 +276,7 @@ def install_collectives(cls, factory=None):
 
 
 def load_native_plugin():
+    flagcx_enabled = _flagcx_enabled()
     versions, files = validate_environment()
     # Invoke the same narrow helper as legacy mode without importing dispatch
     # or vendor patches. The pinned 0.7.0 driver already caches utils eagerly.
@@ -278,8 +289,10 @@ def load_native_plugin():
         install()
         _emit("warmup_compat_ready", target="sgl_kernel_npu.norm.add_rmsnorm_bias")
     import flag_gems
-    from sglang.srt.distributed.parallel_state import GroupCoordinator
     from sglang_fl.native_registration import enable_ones
+
+    if flagcx_enabled:
+        from sglang.srt.distributed.parallel_state import GroupCoordinator
 
     # No YAML dispatch policy, vendor patch import, or broad enable() fallback.
     registration = enable_ones(
@@ -292,7 +305,8 @@ def load_native_plugin():
             else {}
         ),
     )
-    install_collectives(GroupCoordinator)
+    if flagcx_enabled:
+        install_collectives(GroupCoordinator)
     _emit(
         "plugin_ready",
         integration="native",
@@ -300,7 +314,8 @@ def load_native_plugin():
         driver_utils_cache=driver_utils_cache,
         aten_allowlist=["ones"],
         aten_registrations=registration.registered,
-        groups=sorted(GROUPS),
+        flagcx_enabled=flagcx_enabled,
+        groups=sorted(GROUPS) if flagcx_enabled else [],
         files={
             str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest() for p in files
         },
