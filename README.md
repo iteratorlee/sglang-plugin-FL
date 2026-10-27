@@ -54,6 +54,13 @@ constructor warmup is excluded. Submission is not stream completion or graph
 replay evidence: validate synchronized results and real serving profiler traces.
 Failed required transports abort instead of silently falling back.
 
+Native Gems activation passes a plugin-local `AuditedLibrary` to `only_enable`.
+It accepts exactly one successful `("ones", "PrivateUse1")` registration and
+retains the underlying Torch Library for the process lifetime. Missing, failed
+or extra registrations abort even if Gems swallows the registration exception.
+`plugin_ready.aten_registrations` records dispatcher registration, not NPU kernel
+execution; real `ones` execution proof remains the separate Gems NPU smoke.
+
 If the old SGKernel `add_rmsnorm_bias` launch fails with missing constexpr
 arguments on FlagTree 3.5, set `SGLANG_FL_SGL_KERNEL_WARMUP_COMPAT=1` before
 startup. This optional plugin shim adapts only that JIT object's compiled launch

@@ -16,6 +16,7 @@ import torch
 import sglang_fl
 from sglang_fl import native
 from sglang_fl import native_identity
+from sglang_fl import native_registration
 from sglang_fl.distributed.device_communicators import flagcx
 
 
@@ -34,6 +35,7 @@ def clean_environment(monkeypatch):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(sglang_fl, "_plugin_loaded", False)
     monkeypatch.setattr(sglang_fl, "_plugin_active", False)
+    monkeypatch.setattr(native_registration, "_libraries", [])
 
 
 @pytest.fixture
@@ -131,7 +133,16 @@ def test_failure_escapes_sg_exception_handler_and_can_retry(monkeypatch):
 
 
 def test_only_ones_and_no_yaml_policy(environment, monkeypatch):
-    gems = SimpleNamespace(only_enable=Mock(), enable=Mock(side_effect=AssertionError))
+    library = Mock()
+    constructor = Mock(return_value=library)
+    monkeypatch.setattr(native_registration.torch.library, "Library", constructor)
+    fn = Mock()
+    gems = SimpleNamespace(
+        only_enable=Mock(
+            side_effect=lambda lib, **kw: lib.impl("ones", fn, "PrivateUse1")
+        ),
+        enable=Mock(side_effect=AssertionError),
+    )
     monkeypatch.setitem(sys.modules, "flag_gems", gems)
     monkeypatch.setitem(
         sys.modules,
@@ -141,8 +152,48 @@ def test_only_ones_and_no_yaml_policy(environment, monkeypatch):
     monkeypatch.setattr(native, "install_collectives", Mock())
     monkeypatch.setenv("SGLANG_FL_CONFIG", "/must/not/read.yaml")
     native.load_native_plugin()
-    gems.only_enable.assert_called_once_with(include=["ones"], record=False, once=True)
+    audited = native_registration._libraries[0]
+    constructor.assert_called_once_with("aten", "IMPL")
+    gems.only_enable.assert_called_once_with(
+        lib=audited, include=["ones"], record=False, once=True
+    )
+    library.impl.assert_called_once_with("ones", fn, "PrivateUse1")
     gems.enable.assert_not_called()
+
+
+def test_swallowed_gems_registration_failure_cannot_report_plugin_ready(
+    environment, monkeypatch
+):
+    library = Mock()
+    library.impl.side_effect = RuntimeError("dispatcher rejected registration")
+    monkeypatch.setattr(
+        native_registration.torch.library, "Library", lambda *a: library
+    )
+
+    def only_enable(lib, **kwargs):
+        # Match Gems' failure mode: bookkeeping happens first, errors are caught.
+        gems.all_keys.append("ones")
+        try:
+            lib.impl("ones", Mock(), "PrivateUse1")
+        except RuntimeError:
+            pass
+
+    gems = SimpleNamespace(only_enable=only_enable, all_keys=[])
+    monkeypatch.setitem(sys.modules, "flag_gems", gems)
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang.srt.distributed.parallel_state",
+        SimpleNamespace(GroupCoordinator=object),
+    )
+    install, emit = Mock(), Mock()
+    monkeypatch.setattr(native, "install_collectives", install)
+    monkeypatch.setattr(native, "_emit", emit)
+    with pytest.raises(SystemExit, match="ones registration incomplete"):
+        sglang_fl.load_plugin()
+    assert gems.all_keys == ["ones"]
+    assert not sglang_fl.is_plugin_active()
+    install.assert_not_called()
+    emit.assert_not_called()
 
 
 NPU = SimpleNamespace(type="npu", index=0)

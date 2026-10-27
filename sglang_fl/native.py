@@ -274,10 +274,11 @@ def load_native_plugin():
         _emit("warmup_compat_ready", target="sgl_kernel_npu.norm.add_rmsnorm_bias")
     import flag_gems
     from sglang.srt.distributed.parallel_state import GroupCoordinator
+    from sglang_fl.native_registration import enable_ones
 
     # No YAML dispatch policy, vendor patch import, or broad enable() fallback.
-    flag_gems.only_enable(
-        include=["ones"],
+    registration = enable_ones(
+        flag_gems,
         record=os.environ.get("SGLANG_FLAGGEMS_RECORD", "0") == "1",
         once=os.environ.get("SGLANG_FLAGGEMS_LOG_ONCE", "1") == "1",
         **(
@@ -292,6 +293,7 @@ def load_native_plugin():
         integration="native",
         versions=versions,
         aten_allowlist=["ones"],
+        aten_registrations=registration.registered,
         groups=sorted(GROUPS),
         files={
             str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest() for p in files
