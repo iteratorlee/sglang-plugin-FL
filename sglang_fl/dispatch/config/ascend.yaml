@@ -20,6 +20,17 @@ prefer: flagos
 # shape during BiShengIR compilation.  Select the already-registered native
 # torch_npu implementation for this SGLang fused op; other fused/ATen ops keep
 # the global FlagOS preference.  This is also safe for Qwen-family RMSNorm.
+# The fused mhc_sinkhorn operator (fused Sinkhorn normalization for the GLM
+# mhc combinator) is registered by all three backends but deliberately NOT
+# listed under op_backends below, i.e. it is not routed by default.  Under
+# full decode CUDA-graph capture the eager op chain it replaces has no
+# per-kernel launch overhead, and on-device measurement showed the fused
+# Triton kernel is ~5%% slower end-to-end (343.6 vs 361.6 tok/s at
+# 4096/1024/64).  Enable it per deployment by adding:
+#   mhc_sinkhorn: [vendor, flagos, reference]
+# after re-measuring on the target workload (eager prefill benefits;
+# graph decode does not).
+
 op_backends:
   rms_norm: [vendor, flagos, reference]
 
@@ -77,6 +88,20 @@ flagos_blacklist:
   # which Triton-Ascend rejects as coreDim=0.  The native torch_npu zero_ is a
   # no-op for empty tensors and remains graph-safe for non-empty tensors.
   - zero_
+  # GLM-5 Next's native NPU KDA fallback applies exp2 to a non-contiguous
+  # [chunk, head, token, dim] view produced by reshape+transpose.  FlagGems
+  # v5.3.0 treats that input as dense and corrupts the recurrent ``w`` state
+  # (max abs error 0.172 on the reduced multi-sequence reproducer), which is
+  # amplified across KDA layers into invalid concurrent generations.  The
+  # torch_npu kernel preserves the view strides and model semantics.
+  - exp2
+  # The same KDA fallback solves FP32 [chunk, head, 64, 64] lower-triangular
+  # systems.  FlagGems v5.3.0 is unstable for this batched layout: the reduced
+  # multi-sequence reproducer reaches max abs error 0.14286858 in the inverse
+  # and 0.32421875 in the BF16 recurrent state.  With exp2 and this op routed
+  # to torch_npu, every KDA output matches
+  # the native path element-for-element in the multi-sequence reproducer.
+  - linalg_solve_triangular
 
 # OOT dispatch blacklist (sglang op CLASS names, not ATen op names): none needed.
 # MRotaryEmbedding was listed pre-verification but confirmed UNNECESSARY: with
