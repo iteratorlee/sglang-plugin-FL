@@ -19,6 +19,7 @@ from sglang_fl import flagtree_driver
 from sglang_fl import native
 from sglang_fl import native_allocator_warmup
 from sglang_fl import native_identity
+from sglang_fl import native_prefix_profile
 from sglang_fl import native_registration
 from sglang_fl.distributed.device_communicators import flagcx
 
@@ -29,6 +30,9 @@ def clean_environment(monkeypatch):
     # tests intentionally use the seven-file SG integration snapshots.
     monkeypatch.setattr(
         native_allocator_warmup, "configure", Mock(return_value={"status": "requested"})
+    )
+    monkeypatch.setattr(
+        native_prefix_profile, "configure", Mock(return_value={"status": "patched"})
     )
     for key in tuple(os.environ):
         if (

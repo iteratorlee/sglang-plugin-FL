@@ -281,6 +281,9 @@ def load_native_plugin():
     from sglang_fl.native_allocator_warmup import configure
 
     allocator_warmup = configure()
+    from sglang_fl.native_prefix_profile import configure as configure_prefix_profile
+
+    prefix_profile = configure_prefix_profile()
     # Invoke the same narrow helper as legacy mode without importing dispatch
     # or vendor patches. The pinned 0.7.0 driver already caches utils eagerly.
     from sglang_fl.flagtree_driver import patch_flagtree_driver_utils
@@ -316,6 +319,7 @@ def load_native_plugin():
         versions=versions,
         driver_utils_cache=driver_utils_cache,
         allocator_warmup=allocator_warmup,
+        prefix_profile=prefix_profile,
         aten_allowlist=["ones"],
         aten_registrations=registration.registered,
         flagcx_enabled=flagcx_enabled,

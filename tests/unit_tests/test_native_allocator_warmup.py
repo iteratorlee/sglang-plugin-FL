@@ -105,6 +105,11 @@ def test_native_sets_flag_after_identity_before_registration(source, monkeypatch
         assert os.environ[policy.FLAG] == "1"
         return SimpleNamespace(registered=[("ones", "PrivateUse1")])
 
+    from sglang_fl import native_prefix_profile
+
+    monkeypatch.setattr(
+        native_prefix_profile, "configure", lambda: {"status": "patched"}
+    )
     monkeypatch.setattr(native_registration, "enable_ones", register)
     emit = Mock()
     monkeypatch.setattr(native, "_emit", emit)
