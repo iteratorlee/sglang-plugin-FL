@@ -271,6 +271,8 @@ def test_ascend_blacklist_excludes_glm52_incompatible_ops() -> None:
     assert config is not None
     assert "linear" in config["flagos_blacklist"]
     assert "zero_" in config["flagos_blacklist"]
+    assert "exp2" in config["flagos_blacklist"]
+    assert "linalg_solve_triangular" in config["flagos_blacklist"]
     assert config["op_backends"]["rms_norm"] == ["vendor", "flagos", "reference"]
 
 
