@@ -278,6 +278,9 @@ def install_collectives(cls, factory=None):
 def load_native_plugin():
     flagcx_enabled = _flagcx_enabled()
     versions, files = validate_environment()
+    from sglang_fl.native_sampling import configure as configure_sampling
+
+    sampling_boundary = configure_sampling()
     from sglang_fl.native_allocator_warmup import configure
 
     allocator_warmup = configure()
@@ -320,6 +323,7 @@ def load_native_plugin():
         driver_utils_cache=driver_utils_cache,
         allocator_warmup=allocator_warmup,
         prefix_profile=prefix_profile,
+        sampling_boundary=sampling_boundary,
         aten_allowlist=["ones"],
         aten_registrations=registration.registered,
         flagcx_enabled=flagcx_enabled,

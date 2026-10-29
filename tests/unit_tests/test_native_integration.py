@@ -21,6 +21,7 @@ from sglang_fl import native_allocator_warmup
 from sglang_fl import native_identity
 from sglang_fl import native_prefix_profile
 from sglang_fl import native_registration
+from sglang_fl import native_sampling
 from sglang_fl.distributed.device_communicators import flagcx
 
 
@@ -33,6 +34,9 @@ def clean_environment(monkeypatch):
     )
     monkeypatch.setattr(
         native_prefix_profile, "configure", Mock(return_value={"status": "patched"})
+    )
+    monkeypatch.setattr(
+        native_sampling, "configure", Mock(return_value={"status": "patched"})
     )
     for key in tuple(os.environ):
         if (
@@ -220,6 +224,7 @@ def test_only_ones_and_no_yaml_policy(environment, monkeypatch, flagcx_enabled):
     assert emit.call_args.args == ("plugin_ready",)
     assert emit.call_args.kwargs["driver_utils_cache"] == "not_applicable_version"
     assert emit.call_args.kwargs["aten_allowlist"] == ["ones"]
+    assert emit.call_args.kwargs["sampling_boundary"] == {"status": "patched"}
     assert emit.call_args.kwargs["flagcx_enabled"] is (flagcx_enabled != "0")
     assert emit.call_args.kwargs["groups"] == (
         [] if flagcx_enabled == "0" else ["attention_tp", "tp"]
