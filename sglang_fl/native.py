@@ -1,7 +1,8 @@
 """Opt-in FlagOS integration preserving SGLang's native model implementation.
 
 Only FlagGems ``ones`` and optionally dense TP/attention-TP collectives are replaced.
-No platform, model, quantization, FLA, cache, MoE, or PD-transfer patches.
+The audited P early-host opt-in also shares its arena with Mamba host buffers.
+No platform, model, quantization, FLA, MoE, or PD-transfer patches.
 """
 
 from __future__ import annotations
@@ -284,6 +285,9 @@ def load_native_plugin():
     from sglang_fl.native_allocator_warmup import configure
 
     allocator_warmup = configure()
+    from sglang_fl.native_hicache_arena import configure as configure_hicache_arena
+
+    hicache_arena = configure_hicache_arena()
     from sglang_fl.native_prefix_profile import configure as configure_prefix_profile
 
     prefix_profile = configure_prefix_profile()
@@ -322,6 +326,7 @@ def load_native_plugin():
         versions=versions,
         driver_utils_cache=driver_utils_cache,
         allocator_warmup=allocator_warmup,
+        hicache_arena=hicache_arena,
         prefix_profile=prefix_profile,
         sampling_boundary=sampling_boundary,
         aten_allowlist=["ones"],
